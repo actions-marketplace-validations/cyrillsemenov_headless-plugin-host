@@ -519,18 +519,31 @@ pub fn compute_bode_response(
         (y * x.conj()) / denom
     };
 
-    // Unwrap phase continuously across FFT bins from bin 1 upward
+    let peak_norm = (1..x_spec.len())
+        .map(|b| complex_transfer_at_bin(b).norm())
+        .fold(1e-12_f64, f64::max);
+    let coherent_floor = peak_norm * 1e-3; // -60 dB relative to passband peak
+
+    // Unwrap phase continuously across FFT bins where transfer magnitude is above stopband noise floor
     let mut unwrapped_phase_deg = vec![0.0f64; x_spec.len()];
     if x_spec.len() > 1 {
         let mut h_prev = complex_transfer_at_bin(1);
-        let mut acc_rad = h_prev.arg();
+        let mut acc_rad = if h_prev.norm() >= coherent_floor {
+            h_prev.arg()
+        } else {
+            0.0
+        };
         unwrapped_phase_deg[1] = acc_rad * (180.0 / PI);
         for (bin, slot) in unwrapped_phase_deg.iter_mut().enumerate().skip(2) {
             let h_cur = complex_transfer_at_bin(bin);
-            let d_phi = (h_cur * h_prev.conj()).arg();
-            acc_rad += d_phi;
+            if h_cur.norm() >= coherent_floor && h_prev.norm() >= coherent_floor {
+                let d_phi = (h_cur * h_prev.conj()).arg();
+                acc_rad += d_phi;
+            }
             *slot = acc_rad * (180.0 / PI);
-            h_prev = h_cur;
+            if h_cur.norm() >= coherent_floor {
+                h_prev = h_cur;
+            }
         }
     }
 
@@ -545,12 +558,12 @@ pub fn compute_bode_response(
 
         let b_lo = bin.saturating_sub(1);
         let b_hi = (bin + 1).min(x_spec.len() - 1);
-        let group_delay_ms = if b_hi > b_lo {
+        let group_delay_ms = if b_hi > b_lo && h.norm() >= coherent_floor {
             let h_lo = complex_transfer_at_bin(b_lo);
             let h_hi = complex_transfer_at_bin(b_hi);
             let d_phi = (h_hi * h_lo.conj()).arg();
             let d_omega = 2.0 * PI * ((b_hi - b_lo) as f64) * bin_hz;
-            (-d_phi / d_omega) * 1000.0
+            ((-d_phi / d_omega) * 1000.0).clamp(-50.0, 50.0)
         } else {
             0.0
         };

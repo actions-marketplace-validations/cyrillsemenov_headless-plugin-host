@@ -671,6 +671,13 @@ impl PluginInstance for Vst3PluginInstance {
                 } => {
                     let norm = value.clamp(0.0, 1.0);
                     self.update_cached_param_rt(param_id, norm);
+                    if self.is_single_component {
+                        if let Some(ref ctrl) = self.controller {
+                            unsafe {
+                                let _ = (ctrl.setParamNormalized)(ctrl.as_void(), param_id, norm);
+                            }
+                        }
+                    }
                     self.in_param_changes
                         .push_point_rt(param_id, sample_offset as i32, norm);
                 }

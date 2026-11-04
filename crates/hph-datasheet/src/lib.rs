@@ -78,8 +78,10 @@ pub fn measure_trace_snapshot(
 ) -> HostResult<SweepTraceSnapshot> {
     let (in_ch, out_ch) = infer_channel_counts(instance);
 
-    // 1. Small-Signal Impulse -> Linear Bode Response
+    // 1. Small-Signal Impulse -> Linear Bode Response (with 8192-sample parameter-smoothing warm-up)
+    let n_warmup = 8192usize;
     let n_ir = 16384usize;
+    let silence = vec![vec![0.0f32; n_warmup]; in_ch];
     let impulse = generate_signal(
         &SignalSpec::Impulse {
             offset_samples: 0,
@@ -89,13 +91,21 @@ pub fn measure_trace_snapshot(
         n_ir,
     );
     let ir_in = vec![impulse.clone(); in_ch];
+    let mut flush_out = Vec::new();
     instance.activate(sample_rate, 1, 512)?;
     instance.start_processing()?;
     instance.reset();
-    let (ir_out, _, _) = process_audio_stream(instance, &ir_in, out_ch, n_ir, 256, events)?;
+    let _ = instance.flush_params(events, &mut flush_out);
+    let (warm_out, _, _) = process_audio_stream(instance, &silence, out_ch, n_warmup, 256, events)?;
+    let dc_baseline = warm_out
+        .first()
+        .and_then(|ch| ch.last().copied())
+        .unwrap_or(0.0);
+    let (ir_out, _, _) = process_audio_stream(instance, &ir_in, out_ch, n_ir, 256, &[])?;
     instance.stop_processing();
     instance.deactivate();
-    let bode = compute_bode_response(&impulse, &ir_out[0], sample_rate);
+    let ir_clean: Vec<f32> = ir_out[0].iter().map(|&s| s - dc_baseline).collect();
+    let bode = compute_bode_response(&impulse, &ir_clean, sample_rate);
 
     // 2. 1 kHz Sine -> THD+N
     let n_sine = (sample_rate.round() as usize).max(16384);
@@ -112,6 +122,7 @@ pub fn measure_trace_snapshot(
     instance.activate(sample_rate, 1, 512)?;
     instance.start_processing()?;
     instance.reset();
+    let _ = instance.flush_params(events, &mut flush_out);
     let (sine_out, _, _) = process_audio_stream(instance, &sine_in, out_ch, n_sine, 256, events)?;
     instance.stop_processing();
     instance.deactivate();
@@ -126,10 +137,13 @@ pub fn measure_trace_snapshot(
     let dynamics = analyze_dynamics_envelope(sample_rate, |mono_stim| {
         let frames = mono_stim.len();
         let in_bufs = vec![mono_stim.to_vec(); in_ch];
+        let mut fl = Vec::new();
         let _ = instance.activate(sample_rate, 1, 512);
         let _ = instance.start_processing();
         instance.reset();
-        let res = process_audio_stream(instance, &in_bufs, out_ch, frames, 256, events);
+        let _ = instance.flush_params(events, &mut fl);
+        let _ = process_audio_stream(instance, &silence, out_ch, n_warmup, 256, events);
+        let res = process_audio_stream(instance, &in_bufs, out_ch, frames, 256, &[]);
         instance.stop_processing();
         instance.deactivate();
         res.map(|(mut chs, _, _)| chs.swap_remove(0))
@@ -154,11 +168,42 @@ pub fn generate_plugin_datasheet(
     sweep_param: Option<u32>,
     base_events: &[ProcessEvent],
 ) -> HostResult<DatasheetReport> {
+    // Run 9-check validation & multi-block benchmark first
+    let param_infos = instance.params();
+    let default_reset_events: Vec<ProcessEvent> = param_infos
+        .iter()
+        .map(|p| ProcessEvent::ParamValue {
+            sample_offset: 0,
+            param_id: p.id,
+            note_id: -1,
+            port_index: 0,
+            channel: 0,
+            key: 0,
+            value: p.default_value,
+        })
+        .collect();
+
+    let validation = run_full_validation(instance, sample_rate);
+    let mut flush_out = Vec::new();
+    let _ = instance.flush_params(&default_reset_events, &mut flush_out);
+    let _ = instance.flush_params(base_events, &mut flush_out);
+
+    let benchmark = run_benchmarks(
+        instance,
+        &[sample_rate],
+        &[64, 128, 256, 512, 1024],
+        60,
+        false,
+    )?;
+
     let _ = instance.activate(sample_rate, 1, 1024);
+    let _ = instance.start_processing();
+    instance.reset();
+    let _ = instance.flush_params(&default_reset_events, &mut flush_out);
+    let _ = instance.flush_params(base_events, &mut flush_out);
     let descriptor = instance.descriptor().clone();
     let audio_ports = instance.audio_ports();
     let note_ports = instance.note_ports();
-    let param_infos = instance.params();
     let mut param_rows = Vec::new();
     for p in &param_infos {
         let cur = instance.get_param_value(p.id).unwrap_or(p.default_value);
@@ -169,14 +214,13 @@ pub fn generate_plugin_datasheet(
     }
     let latency_samples = instance.latency_samples();
     let tail_samples = instance.tail_samples();
-    instance.deactivate();
 
-    // Optional offscreen GUI screenshot embedded as base64 PNG
+    // Optional offscreen GUI screenshot embedded as base64 PNG (captured while instance is active/initialized)
     let mut gui_data_uri: Option<(u32, u32, String)> = None;
     if instance.supports_gui() {
         let tmp_png =
             std::env::temp_dir().join(format!("hph_datasheet_{}.png", std::process::id()));
-        if let Ok(shot) = capture_plugin_screenshot(instance, &tmp_png, 150, None) {
+        if let Ok(shot) = capture_plugin_screenshot(instance, &tmp_png, 250, None) {
             if let Ok(png_bytes) = std::fs::read(&tmp_png) {
                 gui_data_uri = Some((
                     shot.width,
@@ -188,15 +232,8 @@ pub fn generate_plugin_datasheet(
         }
     }
 
-    // Run 9-check validation & multi-block benchmark
-    let validation = run_full_validation(instance, sample_rate);
-    let benchmark = run_benchmarks(
-        instance,
-        &[sample_rate],
-        &[64, 128, 256, 512, 1024],
-        60,
-        false,
-    )?;
+    instance.stop_processing();
+    instance.deactivate();
 
     let (in_ch, out_ch) = infer_channel_counts(instance);
 
@@ -264,8 +301,20 @@ pub fn generate_plugin_datasheet(
     if let Some(pid) = sweep_param {
         if let Some(pinfo) = param_infos.iter().find(|p| p.id == pid) {
             let use_log = pinfo.min_value >= 5.0 && (pinfo.max_value / pinfo.min_value) >= 50.0;
+            let name_lc = pinfo.name.to_ascii_lowercase();
+            let is_fullband_freq = !pinfo.flags.is_stepped
+                && (name_lc.contains("cutoff") || name_lc.contains("freq"))
+                && instance
+                    .param_value_to_text(pid, pinfo.max_value)
+                    .map(|t| t.contains("kHz") || t.contains("20000"))
+                    .unwrap_or(false);
             for step_idx in 0..5 {
-                let frac = (step_idx as f64) / 4.0;
+                let raw_frac = (step_idx as f64) / 4.0;
+                let frac = if is_fullband_freq {
+                    0.15 + raw_frac * 0.70
+                } else {
+                    raw_frac
+                };
                 let val = if use_log {
                     pinfo.min_value * (pinfo.max_value / pinfo.min_value).powf(frac)
                 } else {
@@ -274,7 +323,8 @@ pub fn generate_plugin_datasheet(
                 let val_txt = instance
                     .param_value_to_text(pid, val)
                     .unwrap_or_else(|| format!("{val:.2}"));
-                let mut evs = base_events.to_vec();
+                let mut evs = default_reset_events.clone();
+                evs.extend_from_slice(base_events);
                 evs.push(ProcessEvent::ParamValue {
                     sample_offset: 0,
                     param_id: pid,

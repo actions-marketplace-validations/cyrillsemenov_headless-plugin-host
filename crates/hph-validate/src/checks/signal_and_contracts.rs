@@ -300,7 +300,14 @@ pub fn check_bypass_and_zipper_noise(
         let in_bufs = vec![dc_stim; in_ch];
         for p in params
             .iter()
-            .filter(|p| !p.flags.is_readonly && !p.flags.is_bypass && !p.flags.is_stepped)
+            .filter(|p| {
+                let name_lc = p.name.to_ascii_lowercase();
+                !p.flags.is_readonly
+                    && !p.flags.is_bypass
+                    && !p.flags.is_stepped
+                    && !name_lc.contains("bypass")
+                    && !name_lc.contains("enable")
+            })
             .take(4)
         {
             let step_events = [

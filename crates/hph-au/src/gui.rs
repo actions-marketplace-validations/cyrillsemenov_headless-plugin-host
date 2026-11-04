@@ -33,6 +33,14 @@ impl PluginGui for AuPluginInstance {
         if self.cocoa_view.is_some() {
             return Ok(());
         }
+        if !self.is_initialized {
+            let sr = if self.sample_rate > 0.0 {
+                self.sample_rate
+            } else {
+                48000.0
+            };
+            let _ = self.activate(sr, 1, 512);
+        }
         unsafe {
             let mut data_size: u32 = 0;
             let mut writable: Boolean = 0;

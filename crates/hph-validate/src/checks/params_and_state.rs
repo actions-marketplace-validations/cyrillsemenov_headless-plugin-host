@@ -133,11 +133,16 @@ pub fn check_state_and_reset_determinism(
 
         let render1 = process_audio_stream(plugin, &in_bufs, out_ch, n_frames, 256, &note_events);
 
-        // Mutate all automatable parameters via flush/process, then restore state & reset
+        // Mutate all non-bypass automatable parameters via flush/process, then restore state & reset
         if let Some(ref state_bytes) = saved_state {
             let mut scramble_events = Vec::new();
             for p in &params {
-                if !p.flags.is_readonly {
+                let name_lc = p.name.to_ascii_lowercase();
+                if !p.flags.is_readonly
+                    && !p.flags.is_bypass
+                    && !name_lc.contains("bypass")
+                    && !name_lc.contains("enabled")
+                {
                     scramble_events.push(ProcessEvent::ParamValue {
                         sample_offset: 0,
                         param_id: p.id,
@@ -161,11 +166,28 @@ pub fn check_state_and_reset_determinism(
         plugin.reset();
         let render2 = process_audio_stream(plugin, &in_bufs, out_ch, n_frames, 256, &note_events);
 
-        // Restore initial state so subsequent checks start with default parameters
+        // Restore initial state and default parameter values so subsequent checks start cleanly
         if let Some(ref state_bytes) = saved_state {
             plugin.stop_processing();
             let _ = plugin.load_state(state_bytes);
+            let _ = plugin.start_processing();
         }
+        let mut restore_events = Vec::new();
+        for p in &params {
+            if !p.flags.is_readonly {
+                let val = plugin.get_param_value(p.id).unwrap_or(p.default_value);
+                restore_events.push(ProcessEvent::ParamValue {
+                    sample_offset: 0,
+                    param_id: p.id,
+                    note_id: -1,
+                    port_index: -1,
+                    channel: -1,
+                    key: -1,
+                    value: val,
+                });
+            }
+        }
+        let _ = process_audio_stream(plugin, &in_bufs, out_ch, 64, 64, &restore_events);
 
         if let (Ok((out1, _, _)), Ok((out2, _, _))) = (render1, render2) {
             let max_diff = out1[0]

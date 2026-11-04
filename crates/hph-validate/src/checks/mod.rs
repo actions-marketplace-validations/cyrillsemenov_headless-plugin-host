@@ -11,7 +11,28 @@ pub use signal_and_contracts::{
 };
 
 use crate::types::ValidationReport;
-use hph_core::PluginInstance;
+use hph_core::{PluginInstance, ProcessEvent};
+
+fn restore_default_parameters(plugin: &mut dyn PluginInstance) {
+    let default_events: Vec<ProcessEvent> = plugin
+        .params()
+        .into_iter()
+        .filter(|p| !p.flags.is_readonly)
+        .map(|p| ProcessEvent::ParamValue {
+            sample_offset: 0,
+            param_id: p.id,
+            note_id: -1,
+            port_index: -1,
+            channel: -1,
+            key: -1,
+            value: p.default_value,
+        })
+        .collect();
+    if !default_events.is_empty() {
+        let mut out = Vec::new();
+        let _ = plugin.flush_params(&default_events, &mut out);
+    }
+}
 
 /// Run the comprehensive validation suite on a plugin instance.
 pub fn run_full_validation(plugin: &mut dyn PluginInstance, sample_rate: f64) -> ValidationReport {
@@ -22,7 +43,9 @@ pub fn run_full_validation(plugin: &mut dyn PluginInstance, sample_rate: f64) ->
     checks.push(check_descriptor_and_extensions(&descriptor, &extensions));
     checks.push(check_ports_topology(plugin));
     checks.push(check_parameters_contract(plugin));
+    restore_default_parameters(plugin);
     checks.push(check_state_and_reset_determinism(plugin, sample_rate));
+    restore_default_parameters(plugin);
     checks.push(check_block_size_invariance(plugin, sample_rate));
     checks.push(check_headroom_and_overload(plugin, sample_rate));
 
@@ -30,7 +53,9 @@ pub fn run_full_validation(plugin: &mut dyn PluginInstance, sample_rate: f64) ->
     checks.push(rt_check);
 
     checks.push(check_bypass_and_zipper_noise(plugin, sample_rate));
+    restore_default_parameters(plugin);
     checks.push(check_extended_contracts(plugin));
+    restore_default_parameters(plugin);
 
     let total_checks = checks.len();
     let passed_checks = checks.iter().filter(|c| c.passed).count();

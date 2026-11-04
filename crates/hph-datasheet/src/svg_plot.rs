@@ -117,6 +117,20 @@ fn compute_nice_y_axis(min_v: f64, max_v: f64, y_unit: &str) -> (f64, f64, Vec<f
     if !min_v.is_finite() || !max_v.is_finite() {
         return (-24.0, 24.0, vec![-24.0, -12.0, 0.0, 12.0, 24.0]);
     }
+    let min_v = if y_unit == "dB" {
+        min_v.max(-60.0)
+    } else if y_unit == "deg" {
+        min_v.max(-360.0)
+    } else {
+        min_v.max(-20.0)
+    };
+    let max_v = if y_unit == "dB" {
+        max_v.min(36.0).max(min_v + 3.0)
+    } else if y_unit == "deg" {
+        max_v.min(360.0).max(min_v + 15.0)
+    } else {
+        max_v.min(50.0).max(min_v + 0.5)
+    };
     let span_raw = (max_v - min_v).max(1.0);
     let pad = span_raw * 0.08;
     let lo_target = if min_v >= -1e-6 && y_unit == "ms" {
@@ -126,7 +140,7 @@ fn compute_nice_y_axis(min_v: f64, max_v: f64, y_unit: &str) -> (f64, f64, Vec<f
     };
     let hi_target = max_v + pad;
     let candidates: &[f64] = if y_unit == "deg" {
-        &[5.0, 10.0, 15.0, 30.0, 45.0, 60.0, 90.0]
+        &[5.0, 10.0, 15.0, 30.0, 45.0, 60.0, 90.0, 120.0, 180.0]
     } else if y_unit == "ms" {
         &[0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0]
     } else {
@@ -142,6 +156,9 @@ fn compute_nice_y_axis(min_v: f64, max_v: f64, y_unit: &str) -> (f64, f64, Vec<f
             chosen_step = step;
             break;
         }
+    }
+    while ((hi_target - lo_target) / chosen_step) > 8.0 {
+        chosen_step *= 2.0;
     }
 
     let mut y_min = (lo_target / chosen_step).floor() * chosen_step;
