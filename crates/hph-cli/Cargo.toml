@@ -1,0 +1,31 @@
+[package]
+name = "hph-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "hph"
+path = "src/main.rs"
+
+[dependencies]
+hph-core.workspace = true
+hph-clap.workspace = true
+hph-vst3.workspace = true
+hph-dsp.workspace = true
+hph-rt-check.workspace = true
+hph-gui.workspace = true
+hph-validate.workspace = true
+hph-datasheet.workspace = true
+hph-manifest.workspace = true
+hph-mcp.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+hph-au.workspace = true
+
+[dev-dependencies]
+hph-mock-plugin = { path = "../hph-mock-plugin" }

@@ -1,0 +1,78 @@
+name: CI (macOS, Windows & Linux)
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test-and-audit:
+    name: Build, Test & Dogfood Action (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            mock_ext: dylib
+            mock_prefix: lib
+            bin_ext: ""
+            gui_runner: ""
+          - os: windows-latest
+            mock_ext: dll
+            mock_prefix: ""
+            bin_ext: ".exe"
+            gui_runner: ""
+          - os: ubuntu-latest
+            mock_ext: so
+            mock_prefix: lib
+            bin_ext: ""
+            gui_runner: "xvfb-run -a"
+
+    steps:
+      - name: Checkout repository & submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Xvfb & X11 runtime on Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y xvfb libx11-6 xauth
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry & target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build workspace (including reference mock CLAP plugin)
+        run: cargo build --workspace
+
+      - name: Run full unit & integration test suite
+        run: ${{ matrix.gui_runner }} cargo test --workspace
+
+      - name: Smoke-test MCP server (hph mcp) JSON-RPC 2.0 endpoint
+        shell: bash
+        run: |
+          printf '%s\n%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"hph_usage_guide","arguments":{"topic":"workflow"}}}' \
+            | ./target/debug/hph${{ matrix.bin_ext }} mcp
+
+      - name: Dogfood Composite Action (Validate, Fuzz, Analyze, Bench & Screenshot)
+        uses: ./
+        with:
+          plugin: target/debug/${{ matrix.mock_prefix }}hph_mock_plugin.${{ matrix.mock_ext }}
+          hph-binary: target/debug/hph${{ matrix.bin_ext }}
+          validate: "true"
+          fuzz-iterations: "200"
+          corrupt-state: "true"
+          analyze-mode: "all"
+          params: "102=0.5"
+          screenshot: "true"
+          screenshot-output: hph-artifacts/mock-plugin-${{ matrix.os }}.png
+          screenshot-warmup-ms: "200"
+          bench: "true"
+          upload-artifacts: "true"
+          artifact-name: hph-audit-${{ matrix.os }}

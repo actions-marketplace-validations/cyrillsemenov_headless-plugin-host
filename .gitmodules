@@ -1,0 +1,6 @@
+[submodule "lib/clap"]
+	path = lib/clap
+	url = https://github.com/free-audio/clap.git
+[submodule "lib/vst3_c_api"]
+	path = lib/vst3_c_api
+	url = https://github.com/steinbergmedia/vst3_c_api.git

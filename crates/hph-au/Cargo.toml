@@ -1,0 +1,18 @@
+[package]
+name = "hph-au"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+hph-core.workspace = true
+hph-au-sys.workspace = true
+libloading.workspace = true
+libc.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation.workspace = true
+objc2.workspace = true
+objc2-foundation.workspace = true
+objc2-app-kit.workspace = true

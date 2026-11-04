@@ -1,0 +1,12 @@
+[package]
+name = "hph-manifest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hph-core.workspace = true
+hph-dsp.workspace = true
+hph-validate.workspace = true
+toml_edit.workspace = true
+anyhow.workspace = true

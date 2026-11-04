@@ -1,0 +1,71 @@
+name: Reusable Audio Plugin Audit & Screenshot Workflow
+
+on:
+  workflow_call:
+    inputs:
+      os:
+        description: "Runner OS ('macos-latest', 'windows-latest', or 'ubuntu-latest')"
+        required: false
+        type: string
+        default: "macos-latest"
+      plugin-artifact-name:
+        description: "Name of the previously uploaded workflow artifact containing the built plugin"
+        required: true
+        type: string
+      plugin-path:
+        description: "Relative path to the `.clap`, `.vst3`, or `.component` inside the downloaded artifact"
+        required: true
+        type: string
+      validate:
+        description: "Run the 8-check validation suite"
+        required: false
+        type: boolean
+        default: true
+      fuzz-iterations:
+        description: "Number of seeded fuzz torture iterations (`0` to skip)"
+        required: false
+        type: number
+        default: 250
+      analyze-mode:
+        description: "DSP analysis mode ('all', 'bode', 'thdn', 'imd', 'rt60', 'delay', 'dynamics', 'stereo', or 'none')"
+        required: false
+        type: string
+        default: "all"
+      screenshot:
+        description: "Capture an offscreen GUI PNG screenshot"
+        required: false
+        type: boolean
+        default: true
+      artifact-output-name:
+        description: "Name of the output audit & screenshot artifact"
+        required: false
+        type: string
+        default: "hph-audit-report"
+
+jobs:
+  audit-plugin:
+    name: hph Audit & Screenshot (${{ inputs.os }})
+    runs-on: ${{ inputs.os }}
+    steps:
+      - name: Checkout headless-plugin-host
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Download built plugin artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.plugin-artifact-name }}
+          path: plugin-under-test
+
+      - name: Run hph Validation, Fuzz, Analysis & Screenshot Action
+        uses: ./
+        with:
+          plugin: plugin-under-test/${{ inputs.plugin-path }}
+          validate: ${{ inputs.validate && 'true' || 'false' }}
+          fuzz-iterations: ${{ inputs.fuzz-iterations }}
+          analyze-mode: ${{ inputs.analyze-mode }}
+          screenshot: ${{ inputs.screenshot && 'true' || 'false' }}
+          screenshot-output: hph-artifacts/plugin-gui-${{ inputs.os }}.png
+          upload-artifacts: "true"
+          artifact-name: ${{ inputs.artifact-output-name }}-${{ inputs.os }}

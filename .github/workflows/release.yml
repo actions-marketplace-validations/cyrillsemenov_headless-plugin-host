@@ -1,0 +1,144 @@
+name: Release CD (macOS Universal, Windows & Linux Binaries)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: Build Release (Linux x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Xvfb & X11 runtime
+        run: sudo apt-get update && sudo apt-get install -y xvfb libx11-6 xauth
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary & mock plugin
+        run: cargo build --release --workspace
+
+      - name: Smoke-test release binary (validate + fuzz + screenshot)
+        run: |
+          ./target/release/hph validate target/release/libhph_mock_plugin.so
+          ./target/release/hph fuzz target/release/libhph_mock_plugin.so --iterations 100 --corrupt-state
+          xvfb-run -a ./target/release/hph screenshot target/release/libhph_mock_plugin.so -o linux-release-check.png
+
+      - name: Package archive (hph-x86_64-unknown-linux-gnu.tar.gz)
+        run: |
+          mkdir -p dist
+          tar -C target/release -czf dist/hph-x86_64-unknown-linux-gnu.tar.gz hph libhph_mock_plugin.so
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-x86_64
+          path: dist/hph-x86_64-unknown-linux-gnu.tar.gz
+
+  build-macos:
+    name: Build Release (macOS Universal aarch64 + x86_64)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release for aarch64-apple-darwin & x86_64-apple-darwin
+        run: |
+          cargo build --release --workspace --target aarch64-apple-darwin
+          cargo build --release -p hph-cli -p hph-mock-plugin --target x86_64-apple-darwin
+
+      - name: Create Universal macOS binary via lipo & smoke-test
+        run: |
+          mkdir -p dist/universal
+          lipo -create \
+            target/aarch64-apple-darwin/release/hph \
+            target/x86_64-apple-darwin/release/hph \
+            -output dist/universal/hph
+          lipo -create \
+            target/aarch64-apple-darwin/release/libhph_mock_plugin.dylib \
+            target/x86_64-apple-darwin/release/libhph_mock_plugin.dylib \
+            -output dist/universal/libhph_mock_plugin.dylib
+          chmod +x dist/universal/hph
+          ./dist/universal/hph validate dist/universal/libhph_mock_plugin.dylib
+          ./dist/universal/hph fuzz dist/universal/libhph_mock_plugin.dylib --iterations 100 --corrupt-state
+          ./dist/universal/hph screenshot dist/universal/libhph_mock_plugin.dylib -o macos-release-check.png
+          tar -C dist/universal -czf dist/hph-universal-apple-darwin.tar.gz hph libhph_mock_plugin.dylib
+          tar -C target/aarch64-apple-darwin/release -czf dist/hph-aarch64-apple-darwin.tar.gz hph libhph_mock_plugin.dylib
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-universal
+          path: dist/*.tar.gz
+
+  build-windows:
+    name: Build Release (Windows x86_64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary & mock plugin
+        run: cargo build --release --workspace
+
+      - name: Smoke-test release binary (validate + fuzz + screenshot)
+        shell: bash
+        run: |
+          ./target/release/hph.exe validate target/release/hph_mock_plugin.dll
+          ./target/release/hph.exe fuzz target/release/hph_mock_plugin.dll --iterations 100 --corrupt-state
+          ./target/release/hph.exe screenshot target/release/hph_mock_plugin.dll -o windows-release-check.png
+
+      - name: Package archive (hph-x86_64-pc-windows-msvc.zip)
+        shell: bash
+        run: |
+          mkdir -p dist
+          7z a -tzip dist/hph-x86_64-pc-windows-msvc.zip ./target/release/hph.exe ./target/release/hph_mock_plugin.dll
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-x86_64
+          path: dist/hph-x86_64-pc-windows-msvc.zip
+
+  publish-release:
+    name: Publish GitHub Release & Checksums
+    needs: [build-linux, build-macos, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all platform release archives
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Compute SHA256SUMS.txt
+        run: |
+          cd release-assets
+          sha256sum hph-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release-assets/hph-*
+            release-assets/SHA256SUMS.txt

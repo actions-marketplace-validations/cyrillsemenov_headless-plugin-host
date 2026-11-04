@@ -1,0 +1,174 @@
+name: "Headless Plugin Host (hph) — Validate, Fuzz, Analyze & Screenshot"
+description: "Validate, fuzz-test, analyze DSP (Bode, THD+N, IMD, RT60, Delay, LUFS), and capture offscreen GUI screenshots of CLAP, VST3, and AUv2 plugins."
+author: "HPH Audio Labs"
+branding:
+  icon: "sliders"
+  color: "blue"
+
+inputs:
+  plugin:
+    description: "Path to the `.clap`, `.vst3`, or `.component` (AUv2) plugin bundle or binary."
+    required: true
+  plugin-id:
+    description: "Optional plugin ID if the bundle contains multiple plugins."
+    required: false
+    default: ""
+  hph-version:
+    description: "Release version tag of `hph` to download (e.g. 'latest', 'v0.1.0'), or 'source' to build from source."
+    required: false
+    default: "latest"
+  hph-binary:
+    description: "Optional explicit path to an existing `hph` executable."
+    required: false
+    default: ""
+  validate:
+    description: "Run the 8-check automated plugin validation suite (`true` or `false`)."
+    required: false
+    default: "true"
+  fuzz-iterations:
+    description: "Number of deterministic seeded chaos/fuzz torture iterations (`0` to skip)."
+    required: false
+    default: "200"
+  fuzz-seed:
+    description: "64-bit PRNG seed for deterministic fuzz torture reproduction."
+    required: false
+    default: "16045690984503098046"
+  corrupt-state:
+    description: "Also fuzz `load_state()` with truncated and bit-flipped state buffers (`true` or `false`)."
+    required: false
+    default: "true"
+  analyze-mode:
+    description: "DSP analysis mode (`all`, `spectrum`, `bode`, `thdn`, `imd`, `rt60`, `delay`, `dynamics`, `stereo`, or `none`)."
+    required: false
+    default: "all"
+  params:
+    description: "Optional space-separated `ID=VALUE` parameter overrides for analysis (e.g. `101=1500.0 102=0.5`)."
+    required: false
+    default: ""
+  screenshot:
+    description: "Capture an offscreen GUI PNG screenshot (`true` or `false`)."
+    required: false
+    default: "true"
+  screenshot-output:
+    description: "Output file path for the captured PNG screenshot."
+    required: false
+    default: "hph-artifacts/plugin-gui.png"
+  screenshot-warmup-ms:
+    description: "Warmup duration in milliseconds to pump timers and event loop before GUI capture."
+    required: false
+    default: "250"
+  bench:
+    description: "Run multi-rate / multi-block DSP & GUI benchmarks (`true` or `false`)."
+    required: false
+    default: "false"
+  suite-file:
+    description: "Optional path to a declarative `.toml` regression suite file."
+    required: false
+    default: ""
+  reports-dir:
+    description: "Directory where structured JSON and text reports will be written."
+    required: false
+    default: "hph-artifacts"
+  upload-artifacts:
+    description: "Upload captured PNG screenshot and JSON/text audit reports as a GitHub Actions artifact (`true` or `false`)."
+    required: false
+    default: "true"
+  artifact-name:
+    description: "Name of the uploaded GitHub Actions artifact bundle."
+    required: false
+    default: "hph-plugin-audit"
+
+outputs:
+  screenshot-path:
+    description: "Path to the captured GUI PNG screenshot."
+    value: ${{ steps.run-hph.outputs.screenshot-path }}
+  reports-dir:
+    description: "Directory containing `inspect.json`, `validate.json`, `fuzz.json`, `analyze.json`, and `screenshot.json`."
+    value: ${{ steps.run-hph.outputs.reports-dir }}
+  validation-passed:
+    description: "Whether all 8 validation checks passed (`true` or `false`)."
+    value: ${{ steps.run-hph.outputs.validation-passed }}
+  fuzz-passed:
+    description: "Whether the seeded fuzz torture suite passed (`true` or `false`)."
+    value: ${{ steps.run-hph.outputs.fuzz-passed }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install Xvfb & X11 runtime on Linux (for offscreen GUI capture)
+      if: runner.os == 'Linux' && (inputs.screenshot == 'true' || inputs.bench == 'true')
+      shell: bash
+      run: |
+        if ! command -v xvfb-run >/dev/null 2>&1; then
+          sudo apt-get update && sudo apt-get install -y xvfb libx11-6 xauth
+        fi
+
+    - name: Try downloading prebuilt hph release binary
+      id: dl-hph
+      if: inputs.hph-binary == '' && inputs.hph-version != 'source'
+      shell: bash
+      env:
+        HPH_VER: ${{ inputs.hph-version }}
+        ACTION_REPO: ${{ github.action_repository }}
+      run: |
+        set +e
+        OS="$(uname -s)"
+        case "$OS" in
+          Darwin*) ARCHIVE="hph-universal-apple-darwin.tar.gz" ;;
+          Linux*)  ARCHIVE="hph-x86_64-unknown-linux-gnu.tar.gz" ;;
+          MINGW*|MSYS*|CYGWIN*) ARCHIVE="hph-x86_64-pc-windows-msvc.zip" ;;
+          *) ARCHIVE="" ;;
+        esac
+        if [ -n "$ARCHIVE" ] && [ -n "$ACTION_REPO" ]; then
+          if [ "$HPH_VER" = "latest" ]; then
+            URL="https://github.com/${ACTION_REPO}/releases/latest/download/${ARCHIVE}"
+          else
+            URL="https://github.com/${ACTION_REPO}/releases/download/${HPH_VER}/${ARCHIVE}"
+          fi
+          mkdir -p "$RUNNER_TEMP/hph-bin"
+          if curl -fsSL "$URL" -o "$RUNNER_TEMP/hph-bin/$ARCHIVE" 2>/dev/null; then
+            if [[ "$ARCHIVE" == *.zip ]]; then
+              unzip -q -o "$RUNNER_TEMP/hph-bin/$ARCHIVE" -d "$RUNNER_TEMP/hph-bin"
+              echo "bin=$RUNNER_TEMP/hph-bin/hph.exe" >> "$GITHUB_OUTPUT"
+            else
+              tar -xzf "$RUNNER_TEMP/hph-bin/$ARCHIVE" -C "$RUNNER_TEMP/hph-bin"
+              chmod +x "$RUNNER_TEMP/hph-bin/hph"
+              echo "bin=$RUNNER_TEMP/hph-bin/hph" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+        fi
+        exit 0
+
+    - name: Run hph Validation, Fuzz, DSP Analysis & Offscreen Screenshot
+      id: run-hph
+      shell: bash
+      env:
+        INPUT_PLUGIN: ${{ inputs.plugin }}
+        INPUT_PLUGIN_ID: ${{ inputs.plugin-id }}
+        INPUT_HPH_BINARY: ${{ inputs.hph-binary != '' && inputs.hph-binary || steps.dl-hph.outputs.bin }}
+        INPUT_HPH_VERSION: ${{ inputs.hph-version }}
+        INPUT_VALIDATE: ${{ inputs.validate }}
+        INPUT_FUZZ_ITERATIONS: ${{ inputs.fuzz-iterations }}
+        INPUT_FUZZ_SEED: ${{ inputs.fuzz-seed }}
+        INPUT_CORRUPT_STATE: ${{ inputs.corrupt-state }}
+        INPUT_ANALYZE_MODE: ${{ inputs.analyze-mode }}
+        INPUT_PARAMS: ${{ inputs.params }}
+        INPUT_SCREENSHOT: ${{ inputs.screenshot }}
+        INPUT_SCREENSHOT_OUTPUT: ${{ inputs.screenshot-output }}
+        INPUT_SCREENSHOT_WARMUP_MS: ${{ inputs.screenshot-warmup-ms }}
+        INPUT_BENCH: ${{ inputs.bench }}
+        INPUT_SUITE_FILE: ${{ inputs.suite-file }}
+        INPUT_REPORTS_DIR: ${{ inputs.reports-dir }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        bash "${{ github.action_path }}/scripts/ci-run-hph.sh"
+
+    - name: Upload hph Screenshot & Audit Reports
+      if: always() && inputs.upload-artifacts == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: |
+          ${{ inputs.reports-dir }}/**
+          ${{ inputs.screenshot-output }}
+        if-no-files-found: ignore

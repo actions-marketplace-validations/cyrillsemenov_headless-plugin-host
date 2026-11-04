@@ -1,0 +1,63 @@
+plugin = "target/debug/libhph_mock_plugin.dylib"
+sample_rate = 48000.0
+run_validation = true
+
+[[tests]]
+name = "Clean 1kHz Sine Passband"
+frames = 48000
+max_true_peak_dbtp = 0.5
+min_rms_dbfs = -12.0
+max_thd_percent = 0.05
+require_zero_rt_allocs = true
+
+[tests.params]
+"100" = 1.0
+"101" = 18000.0
+"102" = 0.0
+
+[tests.signal]
+type = "sine"
+freq_hz = 1000.0
+amplitude = 0.5
+phase_rad = 0.0
+
+[[tests]]
+name = "Driven Saturation Stress"
+frames = 48000
+max_true_peak_dbtp = 0.5
+min_rms_dbfs = -10.0
+min_thd_percent = 5.0
+max_dc_offset_dbfs = -30.0
+require_zero_rt_allocs = true
+
+[tests.params]
+"100" = 1.0
+"101" = 12000.0
+"102" = 0.8
+
+[tests.signal]
+type = "sine"
+freq_hz = 1000.0
+amplitude = 0.8
+phase_rad = 0.0
+
+[[tests]]
+name = "Hot +24dBFS Overdrive Saturation Ceiling"
+frames = 48000
+max_true_peak_dbtp = 2.0
+min_rms_dbfs = -4.0
+max_gain_db = -18.0
+min_thd_percent = 20.0
+max_dc_offset_dbfs = -30.0
+require_zero_rt_allocs = true
+
+[tests.params]
+"100" = 1.0
+"101" = 18000.0
+"102" = 0.8
+
+[tests.signal]
+type = "sine"
+freq_hz = 1000.0
+amplitude = 15.848932
+phase_rad = 0.0

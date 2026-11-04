@@ -1,0 +1,61 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/hph-core",
+    "crates/hph-clap-sys",
+    "crates/hph-clap",
+    "crates/hph-vst3-sys",
+    "crates/hph-vst3",
+    "crates/hph-au-sys",
+    "crates/hph-au",
+    "crates/hph-dsp",
+    "crates/hph-rt-check",
+    "crates/hph-gui",
+    "crates/hph-validate",
+    "crates/hph-datasheet",
+    "crates/hph-manifest",
+    "crates/hph-mcp",
+    "crates/hph-cli",
+    "crates/hph-mock-plugin",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["headless-plugin-host contributors"]
+
+[workspace.dependencies]
+hph-core = { path = "crates/hph-core" }
+hph-clap-sys = { path = "crates/hph-clap-sys" }
+hph-clap = { path = "crates/hph-clap" }
+hph-vst3-sys = { path = "crates/hph-vst3-sys" }
+hph-vst3 = { path = "crates/hph-vst3" }
+hph-au-sys = { path = "crates/hph-au-sys" }
+hph-au = { path = "crates/hph-au" }
+hph-dsp = { path = "crates/hph-dsp" }
+hph-rt-check = { path = "crates/hph-rt-check" }
+hph-gui = { path = "crates/hph-gui" }
+hph-validate = { path = "crates/hph-validate" }
+hph-datasheet = { path = "crates/hph-datasheet" }
+hph-manifest = { path = "crates/hph-manifest" }
+hph-mcp = { path = "crates/hph-mcp" }
+
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+toml_edit = "0.22"
+anyhow = "1.0"
+thiserror = "2.0"
+libloading = "0.8"
+rustfft = "6.2"
+realfft = "3.3"
+hound = "3.5"
+png = "0.17"
+libc = "0.2"
+objc2 = "0.5"
+objc2-foundation = { version = "0.2", features = ["all"] }
+objc2-app-kit = { version = "0.2", features = ["all"] }
+core-graphics = "0.24"
+core-foundation = "0.10"

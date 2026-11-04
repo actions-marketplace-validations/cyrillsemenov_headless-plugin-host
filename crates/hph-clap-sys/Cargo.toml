@@ -1,0 +1,9 @@
+[package]
+name = "hph-clap-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+links = "clap"
+
+[dependencies]
+libc.workspace = true

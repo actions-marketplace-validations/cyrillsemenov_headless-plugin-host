@@ -1,0 +1,9 @@
+[package]
+name = "hph-vst3-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+links = "vst3"
+
+[dependencies]
+libc.workspace = true
