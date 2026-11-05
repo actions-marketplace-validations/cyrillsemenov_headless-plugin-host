@@ -25,8 +25,6 @@ pub struct RtAllocGuard {
     start_bytes: u64,
     #[cfg(target_os = "macos")]
     start_zone: platform::macos::malloc_statistics_t,
-    #[cfg(target_os = "windows")]
-    start_heap: platform::windows::HEAP_SUMMARY,
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     start_mallinfo: platform::linux::mallinfo2,
 }
@@ -44,8 +42,6 @@ impl RtAllocGuard {
         let start_bytes = BYTES_ALLOCATED.load(Ordering::Relaxed);
         #[cfg(target_os = "macos")]
         let start_zone = platform::macos::snapshot_process_heap();
-        #[cfg(target_os = "windows")]
-        let start_heap = platform::windows::snapshot_process_heap();
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         let start_mallinfo = platform::linux::snapshot_process_heap();
         RT_GUARD_ARMED.with(|c| c.set(true));
@@ -55,8 +51,6 @@ impl RtAllocGuard {
             start_bytes,
             #[cfg(target_os = "macos")]
             start_zone,
-            #[cfg(target_os = "windows")]
-            start_heap,
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
             start_mallinfo,
         }
@@ -85,17 +79,6 @@ impl RtAllocGuard {
                     as u64;
             } else if free_calls == 0 && end_zone.blocks_in_use < self.start_zone.blocks_in_use {
                 free_calls = (self.start_zone.blocks_in_use - end_zone.blocks_in_use) as usize;
-            }
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            let end_heap = platform::windows::snapshot_process_heap();
-            if alloc_calls == 0 && end_heap.cb_allocated > self.start_heap.cb_allocated {
-                alloc_calls = 1;
-                bytes_allocated = (end_heap.cb_allocated - self.start_heap.cb_allocated) as u64;
-            } else if free_calls == 0 && end_heap.cb_allocated < self.start_heap.cb_allocated {
-                free_calls = 1;
             }
         }
 

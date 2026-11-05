@@ -91,7 +91,7 @@ SUMMARY_FILE="${GITHUB_STEP_SUMMARY:-$REPORTS_DIR/SUMMARY.md}"
 OUTPUT_FILE="${GITHUB_OUTPUT:-$REPORTS_DIR/github_output.txt}"
 
 {
-  echo "## 🎛️ Headless Plugin Host (\`hph\`) Audit Report"
+  echo "## Headless Plugin Host (\`hph\`) Audit Report"
   echo "- **Plugin**: \`$PLUGIN\`"
   echo "- **Platform**: \`$(uname -s) ($(uname -m))\`"
   echo ""
@@ -107,9 +107,9 @@ echo "::group::1. Inspecting Plugin ($PLUGIN)"
 "$HPH" --json inspect "$PLUGIN" ${ID_ARGS[@]+"${ID_ARGS[@]}"} > "$REPORTS_DIR/inspect.json"
 echo "::endgroup::"
 
-# 3. Validate (8 Checks)
+# 3. Validate
 if [ "$DO_VALIDATE" = "true" ]; then
-  echo "::group::2. Running 8-Check Plugin Validation Suite"
+  echo "::group::2. Running Plugin Validation Suite"
   set +e
   "$HPH" validate "$PLUGIN" ${ID_ARGS[@]+"${ID_ARGS[@]}"} | tee "$REPORTS_DIR/validate.txt"
   VAL_EXIT=$?
@@ -119,13 +119,13 @@ if [ "$DO_VALIDATE" = "true" ]; then
   if [ $VAL_EXIT -ne 0 ]; then
     VALIDATION_PASSED="false"
     OVERALL_FAILED=1
-    VAL_BADGE="❌ FAIL"
+    VAL_BADGE="FAIL"
   else
-    VAL_BADGE="✅ PASS"
+    VAL_BADGE="PASS"
   fi
 
   {
-    echo "### 1. Validation Suite ($VAL_BADGE)"
+    echo "### 1. Validation Suite [$VAL_BADGE]"
     echo '```text'
     cat "$REPORTS_DIR/validate.txt"
     echo '```'
@@ -151,13 +151,13 @@ if [ "${FUZZ_ITERS:-0}" -gt 0 ]; then
   if [ $FUZZ_EXIT -ne 0 ]; then
     FUZZ_PASSED="false"
     OVERALL_FAILED=1
-    FUZZ_BADGE="❌ FAIL"
+    FUZZ_BADGE="FAIL"
   else
-    FUZZ_BADGE="✅ PASS"
+    FUZZ_BADGE="PASS"
   fi
 
   {
-    echo "### 2. Deterministic Fuzz Torture ($FUZZ_BADGE)"
+    echo "### 2. Deterministic Fuzz Torture [$FUZZ_BADGE]"
     echo '```text'
     cat "$REPORTS_DIR/fuzz.txt"
     echo '```'
@@ -193,7 +193,7 @@ if [ "$DO_SCREENSHOT" = "true" ]; then
 
   if [ $SC_EXIT -eq 0 ] && [ -f "$SCREENSHOT_OUT" ]; then
     {
-      echo "### 4. Offscreen GUI Screenshot Capture (✅ Captured)"
+      echo "### 4. Offscreen GUI Screenshot Capture [Captured]"
       echo '```text'
       cat "$REPORTS_DIR/screenshot.txt"
       echo '```'
@@ -201,7 +201,7 @@ if [ "$DO_SCREENSHOT" = "true" ]; then
     } >> "$SUMMARY_FILE"
   else
     {
-      echo "### 4. Offscreen GUI Screenshot Capture (⚠️ Skipped or Headless Plugin)"
+      echo "### 4. Offscreen GUI Screenshot Capture [Skipped or Headless Plugin]"
       echo '```text'
       cat "$REPORTS_DIR/screenshot.txt" || true
       echo '```'

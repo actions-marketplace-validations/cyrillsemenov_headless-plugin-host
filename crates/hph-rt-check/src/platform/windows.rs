@@ -16,6 +16,7 @@ extern "system" {
     fn HeapSummary(hHeap: *mut c_void, dwFlags: u32, lpSummary: *mut HEAP_SUMMARY) -> i32;
 }
 
+#[allow(dead_code)]
 #[inline]
 pub fn snapshot_process_heap() -> HEAP_SUMMARY {
     let mut summary = HEAP_SUMMARY {

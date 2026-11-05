@@ -35,6 +35,13 @@ const PW_RENDERFULLCONTENT: u32 = 0x0000_0002;
 const RDW_INVALIDATE: u32 = 0x0001;
 const RDW_UPDATENOW: u32 = 0x0100;
 const RDW_ALLCHILDREN: u32 = 0x0080;
+const WM_PRINT: u32 = 0x0317;
+const WM_PRINTCLIENT: u32 = 0x0318;
+const PRF_CLIENT: isize = 0x0000_0004;
+const PRF_CHILDREN: isize = 0x0000_0010;
+const PRF_OWNED: isize = 0x0000_0020;
+const GW_CHILD: u32 = 5;
+const GW_HWNDNEXT: u32 = 2;
 
 #[repr(C)]
 struct WNDCLASSEXW {
@@ -152,6 +159,8 @@ extern "system" {
     fn GetDC(hWnd: HWND) -> HDC;
     fn ReleaseDC(hWnd: HWND, hDC: HDC) -> i32;
     fn PrintWindow(hwnd: HWND, hdcBlt: HDC, nFlags: u32) -> i32;
+    fn SendMessageW(hWnd: HWND, Msg: u32, wParam: usize, lParam: isize) -> isize;
+    fn GetWindow(hWnd: HWND, uCmd: u32) -> HWND;
 }
 
 #[link(name = "gdi32")]
@@ -351,6 +360,29 @@ unsafe fn capture_hwnd_rgba(
     }
 
     let num_bytes = (width * height * 4) as usize;
+    let has_pixels = |buf: &[u8]| -> bool {
+        buf.chunks_exact(4)
+            .any(|px| px[0] > 0 || px[1] > 0 || px[2] > 0)
+    };
+    let print_flags = PRF_CLIENT | PRF_CHILDREN | PRF_OWNED;
+
+    // On headless Windows Server CI or offscreen coordinates (-10000,-10000),
+    // DWM PrintWindow(PW_RENDERFULLCONTENT) can return true with an all-zero bitmap.
+    // Fall back to PrintWindow(0) and WM_PRINT / WM_PRINTCLIENT across the host and child HWNDs.
+    if !has_pixels(std::slice::from_raw_parts(bits_ptr, num_bytes)) {
+        let _ = PrintWindow(hwnd, mem_dc, 0);
+    }
+    if !has_pixels(std::slice::from_raw_parts(bits_ptr, num_bytes)) {
+        let _ = SendMessageW(hwnd, WM_PRINT, mem_dc as usize, print_flags);
+        let mut child = GetWindow(hwnd, GW_CHILD);
+        while !child.is_null() {
+            let _ = SendMessageW(child, WM_PRINT, mem_dc as usize, print_flags);
+            let _ = SendMessageW(child, WM_PRINTCLIENT, mem_dc as usize, print_flags);
+            child = GetWindow(child, GW_HWNDNEXT);
+        }
+        pump_win32_messages();
+    }
+
     let bgra = std::slice::from_raw_parts(bits_ptr, num_bytes);
     let mut rgba = vec![0u8; num_bytes];
     for i in (0..num_bytes).step_by(4) {
