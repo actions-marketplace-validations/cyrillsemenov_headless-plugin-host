@@ -1,6 +1,6 @@
-name: "Headless Plugin Host (hph) — Validate, Fuzz, Analyze & Screenshot"
-description: "Validate, fuzz-test, analyze DSP (Bode, THD+N, IMD, RT60, Delay, LUFS), and capture offscreen GUI screenshots of CLAP, VST3, and AUv2 plugins."
-author: "HPH Audio Labs"
+name: "Headless Plugin Host (hph)"
+description: "Validate, fuzz-test, analyze DSP, and capture offscreen GUI screenshots of CLAP, VST3, and AUv2 audio plugins."
+author: "Cyrill Semenov"
 branding:
   icon: "sliders"
   color: "blue"
@@ -165,7 +165,7 @@ runs:
 
     - name: Upload hph Screenshot & Audit Reports
       if: always() && inputs.upload-artifacts == 'true'
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: ${{ inputs.artifact-name }}
         path: |
