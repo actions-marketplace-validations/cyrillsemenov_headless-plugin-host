@@ -41,6 +41,14 @@ pub(crate) struct AuBundleInner {
     pub(crate) entries: Vec<AuComponentEntry>,
 }
 
+impl Drop for AuBundleInner {
+    fn drop(&mut self) {
+        // Keep the Mach-O library mapped for the lifetime of the process so registered
+        // Objective-C classes and C++ static destructors are never unmapped early.
+        std::mem::forget(self._library.take());
+    }
+}
+
 unsafe impl Send for AuBundleInner {}
 unsafe impl Sync for AuBundleInner {}
 
@@ -227,10 +235,13 @@ impl PluginBundle for AuBundle {
         };
 
         let binary_path = resolve_component_binary(&bundle_root, exec_name.as_deref());
-        let library = if let Some(ref bin) = binary_path {
-            unsafe { Library::new(bin).ok() }
+        let (library, dlopen_err) = if let Some(ref bin) = binary_path {
+            match unsafe { Library::new(bin) } {
+                Ok(lib) => (Some(lib), None),
+                Err(e) => (None, Some(e.to_string())),
+            }
         } else {
-            None
+            (None, None)
         };
 
         let comps_key = CFString::from_static_string("AudioComponents");
@@ -354,6 +365,12 @@ impl PluginBundle for AuBundle {
         unsafe { CFRelease(cf_bundle as CFTypeRef) };
 
         if entries.is_empty() {
+            if let Some(err) = dlopen_err {
+                return Err(HostError::LoadError(format!(
+                    "Failed to dlopen AU binary in '{}': {err}",
+                    bundle_root.display()
+                )));
+            }
             return Err(HostError::LoadError(format!(
                 "No valid AudioComponents could be registered or found in {}",
                 bundle_root.display()

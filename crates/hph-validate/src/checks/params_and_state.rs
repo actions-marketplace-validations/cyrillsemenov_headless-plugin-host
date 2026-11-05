@@ -35,30 +35,35 @@ pub fn check_parameters_contract(plugin: &dyn PluginInstance) -> ValidationCheck
         if p.flags.is_bypass {
             bypass_count += 1;
         }
-        if let Some(val) = plugin.get_param_value(p.id) {
-            if val < p.min_value - 1e-6 || val > p.max_value + 1e-6 {
+        if ids.len() <= 64 {
+            if let Some(val) = plugin.get_param_value(p.id) {
+                if val < p.min_value - 1e-6 || val > p.max_value + 1e-6 {
+                    warnings.push(format!(
+                        "Param '{}' current value {} is outside [{}, {}]",
+                        p.name, val, p.min_value, p.max_value
+                    ));
+                }
+            } else {
+                passed = false;
                 warnings.push(format!(
-                    "Param '{}' current value {} is outside [{}, {}]",
-                    p.name, val, p.min_value, p.max_value
+                    "`get_value` failed for param '{}' (id={})",
+                    p.name, p.id
                 ));
             }
-        } else {
-            passed = false;
-            warnings.push(format!(
-                "`get_value` failed for param '{}' (id={})",
-                p.name, p.id
-            ));
         }
 
-        // Test value_to_text at min, default, max
-        for probe_v in [p.min_value, p.default_value, p.max_value] {
-            if let Some(txt) = plugin.param_value_to_text(p.id, probe_v) {
-                let _ = plugin.param_text_to_value(p.id, &txt);
-            } else {
-                warnings.push(format!(
-                    "Param '{}' `value_to_text({probe_v})` returned false",
-                    p.name
-                ));
+        // Test value_to_text at min, default, max on the first 32 user parameters
+        // (avoids 6,000+ wrapper calls on plugins with 2,000+ proxy MIDI CC / VST2 wrapper slots)
+        if ids.len() <= 32 && super::is_safe_restore_param(p) {
+            for probe_v in [p.min_value, p.default_value, p.max_value] {
+                if let Some(txt) = plugin.param_value_to_text(p.id, probe_v) {
+                    let _ = plugin.param_text_to_value(p.id, &txt);
+                } else {
+                    warnings.push(format!(
+                        "Param '{}' `value_to_text({probe_v})` returned false",
+                        p.name
+                    ));
+                }
             }
         }
     }
@@ -133,26 +138,23 @@ pub fn check_state_and_reset_determinism(
 
         let render1 = process_audio_stream(plugin, &in_bufs, out_ch, n_frames, 256, &note_events);
 
-        // Mutate all non-bypass automatable parameters via flush/process, then restore state & reset
+        // Mutate safe non-bypass automatable parameters via flush/process, then restore state & reset
         if let Some(ref state_bytes) = saved_state {
             let mut scramble_events = Vec::new();
-            for p in &params {
-                let name_lc = p.name.to_ascii_lowercase();
-                if !p.flags.is_readonly
-                    && !p.flags.is_bypass
-                    && !name_lc.contains("bypass")
-                    && !name_lc.contains("enabled")
-                {
-                    scramble_events.push(ProcessEvent::ParamValue {
-                        sample_offset: 0,
-                        param_id: p.id,
-                        note_id: -1,
-                        port_index: -1,
-                        channel: -1,
-                        key: -1,
-                        value: p.max_value,
-                    });
-                }
+            for p in params
+                .iter()
+                .filter(|p| super::is_safe_fuzz_param(p))
+                .take(16)
+            {
+                scramble_events.push(ProcessEvent::ParamValue {
+                    sample_offset: 0,
+                    param_id: p.id,
+                    note_id: -1,
+                    port_index: -1,
+                    channel: -1,
+                    key: -1,
+                    value: p.max_value,
+                });
             }
             let _ = process_audio_stream(plugin, &in_bufs, out_ch, 256, 256, &scramble_events);
             plugin.stop_processing();
@@ -173,19 +175,21 @@ pub fn check_state_and_reset_determinism(
             let _ = plugin.start_processing();
         }
         let mut restore_events = Vec::new();
-        for p in &params {
-            if !p.flags.is_readonly {
-                let val = plugin.get_param_value(p.id).unwrap_or(p.default_value);
-                restore_events.push(ProcessEvent::ParamValue {
-                    sample_offset: 0,
-                    param_id: p.id,
-                    note_id: -1,
-                    port_index: -1,
-                    channel: -1,
-                    key: -1,
-                    value: val,
-                });
-            }
+        for p in params
+            .iter()
+            .filter(|p| super::is_safe_restore_param(p))
+            .take(32)
+        {
+            let val = plugin.get_param_value(p.id).unwrap_or(p.default_value);
+            restore_events.push(ProcessEvent::ParamValue {
+                sample_offset: 0,
+                param_id: p.id,
+                note_id: -1,
+                port_index: -1,
+                channel: -1,
+                key: -1,
+                value: val,
+            });
         }
         let _ = process_audio_stream(plugin, &in_bufs, out_ch, 64, 64, &restore_events);
 

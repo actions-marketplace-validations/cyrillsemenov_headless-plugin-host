@@ -91,17 +91,17 @@ pub fn check_realtime_allocation_and_threads(
     );
     let in_bufs = vec![stim; in_ch];
 
-    // Generate parameter automation sweep events on non-bypass parameters
-    let mut events = Vec::new();
-    for (idx, p) in plugin
+    // Generate parameter automation sweep events on safe non-bypass parameters (sorted by sample_offset)
+    let safe_params: Vec<ParamInfo> = plugin
         .params()
-        .iter()
-        .filter(|p| !p.flags.is_readonly && !p.flags.is_bypass)
+        .into_iter()
+        .filter(super::is_safe_fuzz_param)
         .take(4)
-        .enumerate()
-    {
-        for step in 0..8 {
-            let frac = (step as f64) / 7.0;
+        .collect();
+    let mut events = Vec::new();
+    for step in 0..8 {
+        let frac = (step as f64) / 7.0;
+        for (idx, p) in safe_params.iter().enumerate() {
             let val = p.min_value + frac * (p.max_value - p.min_value);
             events.push(ProcessEvent::ParamValue {
                 sample_offset: (step * 512 + idx * 16).min(n_frames - 1) as u32,
@@ -117,8 +117,21 @@ pub fn check_realtime_allocation_and_threads(
 
     let mut rt_stats = RtAllocStats::default();
     if plugin.activate(sample_rate, 1, 1024).is_ok() && plugin.start_processing().is_ok() {
-        // Warm up 1 block outside RT check
-        let _ = process_audio_stream(plugin, &in_bufs, out_ch, 256, 256, &[]);
+        // Warm up 1 block (including 1 initial event per automated parameter) outside RT check
+        // so one-time SDK/plugin per-parameter modulation queues settle before steady-state check
+        let warmup_events: Vec<ProcessEvent> = safe_params
+            .iter()
+            .map(|p| ProcessEvent::ParamValue {
+                sample_offset: 0,
+                param_id: p.id,
+                note_id: -1,
+                port_index: -1,
+                channel: -1,
+                key: -1,
+                value: p.default_value,
+            })
+            .collect();
+        let _ = process_audio_stream(plugin, &in_bufs, out_ch, 256, 256, &warmup_events);
         if let Ok((_, _, stats)) =
             process_audio_stream(plugin, &in_bufs, out_ch, n_frames, 256, &events)
         {

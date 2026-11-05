@@ -462,16 +462,26 @@ pub fn build_printable_html_datasheet(
           <thead><tr><th>Port</th><th>Direction</th><th>Channels</th><th>Type</th><th>PDC / Tail</th></tr></thead>
           <tbody>"#
     );
+    let lat_str = match latency_samples {
+        Some(n) => format!("{n} smp"),
+        None => "N/A".to_string(),
+    };
+    let tail_str = match tail_samples {
+        Some(u32::MAX) => "∞ (Infinite)".to_string(),
+        Some(n) if n > 10_000_000 => "∞ (Infinite)".to_string(),
+        Some(n) => format!("{n} smp"),
+        None => "N/A".to_string(),
+    };
     for p in audio_ports {
         let _ = writeln!(
             html,
-            r#"            <tr><td>{}</td><td class="mono">{}</td><td class="mono">{}</td><td>{}</td><td class="mono">Lat={:?} / Tail={:?}</td></tr>"#,
+            r#"            <tr><td>{}</td><td class="mono">{}</td><td class="mono">{}</td><td>{}</td><td class="mono">Lat={} / Tail={}</td></tr>"#,
             xml_escape(&p.name),
             if p.is_input { "INPUT" } else { "OUTPUT" },
             p.channel_count,
             xml_escape(&p.port_type),
-            latency_samples,
-            tail_samples
+            lat_str,
+            tail_str
         );
     }
     for np in note_ports {
@@ -491,7 +501,20 @@ pub fn build_printable_html_datasheet(
           <thead><tr><th>ID</th><th>Parameter Name</th><th>Range</th><th>Default</th><th>Active Value</th></tr></thead>
           <tbody>"#
     );
-    for (p, _cur, txt) in params.iter().take(16) {
+    let mut visible_params: Vec<&(ParamInfo, f64, String)> = params
+        .iter()
+        .filter(|(p, _, _)| {
+            let trimmed = p.name.trim();
+            !trimmed.is_empty()
+                && !p.flags.is_hidden
+                && !trimmed.to_ascii_lowercase().starts_with("midi cc")
+        })
+        .take(16)
+        .collect();
+    if visible_params.is_empty() {
+        visible_params = params.iter().take(16).collect();
+    }
+    for (p, _cur, txt) in visible_params {
         let _ = writeln!(
             html,
             r#"            <tr><td class="mono">{}</td><td>{}</td><td class="mono">[{:.2} .. {:.2}]</td><td class="mono">{:.2}</td><td class="mono">{}</td></tr>"#,
@@ -535,13 +558,17 @@ pub fn build_printable_html_datasheet(
     );
 
     // Section 3: Dynamics, Compression & +24 dBFS Overdrive Transfer Curve
+    let thresh_str = match primary.dynamics.estimated_threshold_dbfs {
+        Some(t) => format!("{t:.1} dBFS"),
+        None => "N/A (Linear)".to_string(),
+    };
     let _ = writeln!(
         html,
         r#"  <div class="section">
     <h2 class="section-title">3. Dynamics Transfer Curve &amp; Headroom Overdrive (-48 dBFS to +24 dBFS)</h2>
     <div style="margin-bottom:8px;color:#334155;">
       <strong>Estimated Ratio:</strong> <code>{:.2}:1</code> &nbsp;|&nbsp;
-      <strong>Threshold Knee:</strong> <code>{:?} dBFS</code> &nbsp;|&nbsp;
+      <strong>Threshold Knee:</strong> <code>{}</code> &nbsp;|&nbsp;
       <strong>Max Tone-Burst GR:</strong> <code>{:.2} dB</code> &nbsp;|&nbsp;
       <strong>Attack (10–90%):</strong> <code>{:.2} ms</code> &nbsp;|&nbsp;
       <strong>Release (10–90%):</strong> <code>{:.2} ms</code>
@@ -550,7 +577,7 @@ pub fn build_printable_html_datasheet(
     {svg_dyn_gain}
   </div>"#,
         primary.dynamics.estimated_ratio,
-        primary.dynamics.estimated_threshold_dbfs,
+        thresh_str,
         primary.dynamics.max_gain_reduction_db,
         primary.dynamics.attack_time_ms,
         primary.dynamics.release_time_ms
@@ -562,7 +589,7 @@ pub fn build_printable_html_datasheet(
         r#"  <div class="section">
     <h2 class="section-title">4. Nonlinear Harmonic Profile (THD+N) &amp; Two-Tone Intermodulation (IMD)</h2>
     <div style="margin-bottom:8px;color:#334155;">
-      <strong>THD @ 1 kHz:</strong> <code>{:.4}% ({:.2} dB)</code> &nbsp;|&nbsp;
+      <strong>THD @ {:.0} Hz:</strong> <code>{:.4}% ({:.2} dB)</code> &nbsp;|&nbsp;
       <strong>Even Harmonics:</strong> <code>{:.2} dB</code> &nbsp;|&nbsp;
       <strong>Odd Harmonics:</strong> <code>{:.2} dB</code> &nbsp;|&nbsp;
       <strong>SINAD:</strong> <code>{:.2} dB</code> &nbsp;|&nbsp;
@@ -571,6 +598,7 @@ pub fn build_printable_html_datasheet(
     </div>
     {svg_harmonics}
   </div>"#,
+        primary.thdn.fundamental_freq_hz,
         primary.thdn.thd_percent,
         primary.thdn.thd_db,
         primary.thdn.even_thd_db,
@@ -582,6 +610,10 @@ pub fn build_printable_html_datasheet(
     );
 
     // Section 5: Spatial Decay (9-Band Octave RT60), Echo Taps & Stereo Image
+    let pdc_disc_str = match delay.latency_discrepancy_samples {
+        Some(d) => format!("{d:+} smp"),
+        None => "N/A".to_string(),
+    };
     let _ = writeln!(
         html,
         r#"  <div class="section">
@@ -589,7 +621,7 @@ pub fn build_printable_html_datasheet(
     <div style="margin-bottom:8px;color:#334155;">
       <strong>Broadband RT60:</strong> <code>{:.3} s</code> (EDT={:.3}s, T20={:.3}s, T30={:.3}s, R&sup2;={:.3}) &nbsp;|&nbsp;
       <strong>Onset Delay:</strong> <code>{} smp ({:.2} ms)</code> &nbsp;|&nbsp;
-      <strong>PDC Discrepancy:</strong> <code>{:?} smp</code> &nbsp;|&nbsp;
+      <strong>PDC Discrepancy:</strong> <code>{}</code> &nbsp;|&nbsp;
       <strong>Stereo Phase Correlation:</strong> <code>{:+.4}</code> (Width={:.3})
     </div>
     {svg_rt60}
@@ -601,7 +633,7 @@ pub fn build_printable_html_datasheet(
         rt60.r_squared,
         delay.onset_delay_samples,
         delay.onset_delay_ms,
-        delay.latency_discrepancy_samples,
+        pdc_disc_str,
         stereo.phase_correlation,
         stereo.stereo_width
     );
@@ -622,13 +654,21 @@ pub fn build_printable_html_datasheet(
         } else {
             r#"<span class="badge badge-fail">FAIL</span>"#
         };
+        let mut findings = xml_escape(&chk.details);
+        for w in &chk.warnings {
+            let _ = write!(
+                findings,
+                r#"<div style="color:#b45309;font-size:10px;margin-top:2px;">&#9888; {}</div>"#,
+                xml_escape(w)
+            );
+        }
         let _ = writeln!(
             html,
             r#"        <tr><td>{badge}</td><td>{}</td><td><strong>{}</strong></td><td class="mono">{:.2} ms</td><td class="mono">{}</td></tr>"#,
             xml_escape(&chk.category),
             xml_escape(&chk.name),
             chk.duration_ms,
-            xml_escape(&chk.details)
+            findings
         );
     }
     let _ = writeln!(

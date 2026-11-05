@@ -139,12 +139,15 @@ pub fn process_audio_stream(
 
 pub fn infer_channel_counts(plugin: &dyn PluginInstance) -> (usize, usize) {
     let ports = plugin.audio_ports();
+    if ports.is_empty() {
+        return (2, 2);
+    }
     let in_ch = ports
         .iter()
         .find(|p| p.is_input && p.is_main)
         .or_else(|| ports.iter().find(|p| p.is_input))
         .map(|p| p.channel_count as usize)
-        .unwrap_or(2);
+        .unwrap_or(0);
     let out_ch = ports
         .iter()
         .find(|p| !p.is_input && p.is_main)

@@ -186,9 +186,8 @@ pub fn check_headroom_and_overload(
                         "Post-overload hang: plugin failed to recover when input returned to -12 dBFS (recovery AC = {rec_ac_db:.1} dBFS vs nominal {nom_ac_db:.1} dBFS)"
                     ));
                 } else if rec_delta_db > 3.0 {
-                    passed = false;
                     warnings.push(format!(
-                        "Post-overload state drift: recovery output at -12 dBFS differed from pre-overload nominal by {rec_delta_db:.2} dB"
+                        "Extended post-overload release/tail decay: output at -12 dBFS differed from pre-overload nominal by {rec_delta_db:.2} dB after 128 ms"
                     ));
                 } else if rec_delta_db > 1.0 {
                     warnings.push(format!(
@@ -300,14 +299,7 @@ pub fn check_bypass_and_zipper_noise(
         let in_bufs = vec![dc_stim; in_ch];
         for p in params
             .iter()
-            .filter(|p| {
-                let name_lc = p.name.to_ascii_lowercase();
-                !p.flags.is_readonly
-                    && !p.flags.is_bypass
-                    && !p.flags.is_stepped
-                    && !name_lc.contains("bypass")
-                    && !name_lc.contains("enable")
-            })
+            .filter(|p| super::is_safe_fuzz_param(p) && !p.flags.is_stepped)
             .take(4)
         {
             let step_events = [

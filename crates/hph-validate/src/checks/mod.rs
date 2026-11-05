@@ -11,31 +11,79 @@ pub use signal_and_contracts::{
 };
 
 use crate::types::ValidationReport;
-use hph_core::{PluginInstance, ProcessEvent};
+use hph_core::{ParamInfo, PluginInstance, ProcessEvent};
 
-fn restore_default_parameters(plugin: &mut dyn PluginInstance) {
-    let default_events: Vec<ProcessEvent> = plugin
-        .params()
-        .into_iter()
-        .filter(|p| !p.flags.is_readonly)
-        .map(|p| ProcessEvent::ParamValue {
-            sample_offset: 0,
-            param_id: p.id,
-            note_id: -1,
-            port_index: -1,
-            channel: -1,
-            key: -1,
-            value: p.default_value,
-        })
-        .collect();
-    if !default_events.is_empty() {
-        let mut out = Vec::new();
-        let _ = plugin.flush_params(&default_events, &mut out);
+pub(crate) fn is_safe_restore_param(p: &ParamInfo) -> bool {
+    if p.flags.is_readonly || p.flags.is_hidden || (p.flags.raw_bits & (1 << 15)) != 0 {
+        return false;
+    }
+    let name_lc = p.name.to_ascii_lowercase();
+    !name_lc.contains("preset")
+        && !name_lc.contains("program")
+        && !name_lc.contains("midi cc")
+        && !name_lc.contains("trigger")
+}
+
+pub(crate) fn is_safe_fuzz_param(p: &ParamInfo) -> bool {
+    if !is_safe_restore_param(p) || p.flags.is_bypass {
+        return false;
+    }
+    let name_lc = p.name.to_ascii_lowercase();
+    !name_lc.contains("bypass")
+        && !name_lc.contains("enable")
+        && !name_lc.contains("panic")
+        && !name_lc.contains("reset")
+}
+
+struct InitialPluginSnapshot {
+    state: Option<Vec<u8>>,
+    param_events: Vec<ProcessEvent>,
+}
+
+impl InitialPluginSnapshot {
+    fn capture(plugin: &mut dyn PluginInstance) -> Self {
+        let state = if plugin.supports_state() {
+            plugin.save_state().ok()
+        } else {
+            None
+        };
+        let param_events = plugin
+            .params()
+            .into_iter()
+            .filter(is_safe_restore_param)
+            .map(|p| {
+                let val = plugin.get_param_value(p.id).unwrap_or(p.default_value);
+                ProcessEvent::ParamValue {
+                    sample_offset: 0,
+                    param_id: p.id,
+                    note_id: -1,
+                    port_index: -1,
+                    channel: -1,
+                    key: -1,
+                    value: val,
+                }
+            })
+            .collect();
+        Self {
+            state,
+            param_events,
+        }
+    }
+
+    fn restore(&self, plugin: &mut dyn PluginInstance) {
+        if let Some(ref bytes) = self.state {
+            let _ = plugin.load_state(bytes);
+        }
+        if !self.param_events.is_empty() {
+            let mut out = Vec::new();
+            let _ = plugin.flush_params(&self.param_events, &mut out);
+        }
     }
 }
 
 /// Run the comprehensive validation suite on a plugin instance.
 pub fn run_full_validation(plugin: &mut dyn PluginInstance, sample_rate: f64) -> ValidationReport {
+    let initial = InitialPluginSnapshot::capture(plugin);
     let descriptor = plugin.descriptor().clone();
     let extensions = plugin.probe_extensions();
     let mut checks = Vec::with_capacity(9);
@@ -43,9 +91,9 @@ pub fn run_full_validation(plugin: &mut dyn PluginInstance, sample_rate: f64) ->
     checks.push(check_descriptor_and_extensions(&descriptor, &extensions));
     checks.push(check_ports_topology(plugin));
     checks.push(check_parameters_contract(plugin));
-    restore_default_parameters(plugin);
+    initial.restore(plugin);
     checks.push(check_state_and_reset_determinism(plugin, sample_rate));
-    restore_default_parameters(plugin);
+    initial.restore(plugin);
     checks.push(check_block_size_invariance(plugin, sample_rate));
     checks.push(check_headroom_and_overload(plugin, sample_rate));
 
@@ -53,9 +101,9 @@ pub fn run_full_validation(plugin: &mut dyn PluginInstance, sample_rate: f64) ->
     checks.push(rt_check);
 
     checks.push(check_bypass_and_zipper_noise(plugin, sample_rate));
-    restore_default_parameters(plugin);
+    initial.restore(plugin);
     checks.push(check_extended_contracts(plugin));
-    restore_default_parameters(plugin);
+    initial.restore(plugin);
 
     let total_checks = checks.len();
     let passed_checks = checks.iter().filter(|c| c.passed).count();

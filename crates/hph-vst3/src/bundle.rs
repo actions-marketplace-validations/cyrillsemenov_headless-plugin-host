@@ -32,7 +32,7 @@ unsafe impl Sync for Vst3BundleInner {}
 
 impl Drop for Vst3BundleInner {
     fn drop(&mut self) {
-        // Release IPluginFactory before invoking bundleExit/ExitDll/ModuleExit and unloading _library
+        // Release IPluginFactory before invoking bundleExit/ExitDll/ModuleExit
         drop(self.factory.take());
         unsafe {
             if let Some(exit_fn) = self.bundle_exit_fn {
@@ -44,6 +44,9 @@ impl Drop for Vst3BundleInner {
                 self.cf_bundle_ref = ptr::null_mut();
             }
         }
+        // Keep the shared library mapped so detached plugin threads and registered
+        // Objective-C classes / C++ atexit handlers never jump into unmapped pages.
+        std::mem::forget(self._library.take());
     }
 }
 

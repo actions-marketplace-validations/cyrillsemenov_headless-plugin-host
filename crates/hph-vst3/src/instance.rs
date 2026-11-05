@@ -119,7 +119,7 @@ impl Vst3PluginInstance {
             return;
         };
         unsafe {
-            let count = (ctrl.getParameterCount)(ctrl.as_void());
+            let count = (ctrl.getParameterCount)(ctrl.as_void()).min(64);
             for i in 0..count {
                 let mut info: Steinberg_Vst_ParameterInfo = std::mem::zeroed();
                 if (ctrl.getParameterInfo)(ctrl.as_void(), i, &mut info) == kResultOk {
@@ -423,6 +423,9 @@ impl PluginInstance for Vst3PluginInstance {
         events: &[ProcessEvent],
         out_events: &mut Vec<ProcessEvent>,
     ) -> HostResult<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
         self.in_param_changes.clear_rt();
         self.out_param_changes.clear_rt();
         self.in_event_list.events.clear();
@@ -457,15 +460,49 @@ impl PluginInstance for Vst3PluginInstance {
             let _ = self.start_processing();
         }
 
+        let mut ptr_offset = 0usize;
+        for (bus_idx, &ch_count) in self.in_bus_channel_counts.iter().enumerate() {
+            for ch in 0..ch_count {
+                let global_ch = ptr_offset + ch;
+                self.scratch_in_ptrs[global_ch] = self.scratch_dummy_in[global_ch].as_mut_ptr();
+            }
+            self.scratch_in_buses[bus_idx].numChannels = ch_count as i32;
+            self.scratch_in_buses[bus_idx].silenceFlags = 0;
+            self.scratch_in_buses[bus_idx].buffers.channelBuffers32 =
+                unsafe { self.scratch_in_ptrs.as_mut_ptr().add(ptr_offset) };
+            ptr_offset += ch_count;
+        }
+
+        let mut out_ptr_offset = 0usize;
+        for (bus_idx, &ch_count) in self.out_bus_channel_counts.iter().enumerate() {
+            for ch in 0..ch_count {
+                let global_ch = out_ptr_offset + ch;
+                self.scratch_out_ptrs[global_ch] = self.scratch_dummy_out[global_ch].as_mut_ptr();
+            }
+            self.scratch_out_buses[bus_idx].numChannels = ch_count as i32;
+            self.scratch_out_buses[bus_idx].silenceFlags = 0;
+            self.scratch_out_buses[bus_idx].buffers.channelBuffers32 =
+                unsafe { self.scratch_out_ptrs.as_mut_ptr().add(out_ptr_offset) };
+            out_ptr_offset += ch_count;
+        }
+
         unsafe {
             let mut data = Steinberg_Vst_ProcessData {
                 processMode: Steinberg_Vst_ProcessModes_kRealtime,
                 symbolicSampleSize: Steinberg_Vst_SymbolicSampleSizes_kSample32,
                 numSamples: 0,
-                numInputs: 0,
-                numOutputs: 0,
-                inputs: ptr::null_mut(),
-                outputs: ptr::null_mut(),
+                numInputs: self.scratch_in_buses.len() as i32,
+                numOutputs: self.scratch_out_buses.len() as i32,
+                inputs: if self.scratch_in_buses.is_empty() {
+                    ptr::null_mut()
+                } else {
+                    self.scratch_in_buses.as_mut_ptr()
+                },
+                outputs: if self.scratch_out_buses.is_empty() {
+                    ptr::null_mut()
+                } else {
+                    self.scratch_out_buses.as_mut_ptr()
+                },
                 inputParameterChanges: self.in_param_changes.as_ptr(),
                 outputParameterChanges: self.out_param_changes.as_ptr(),
                 inputEvents: self.in_event_list.as_ptr(),
@@ -671,13 +708,6 @@ impl PluginInstance for Vst3PluginInstance {
                 } => {
                     let norm = value.clamp(0.0, 1.0);
                     self.update_cached_param_rt(param_id, norm);
-                    if self.is_single_component {
-                        if let Some(ref ctrl) = self.controller {
-                            unsafe {
-                                let _ = (ctrl.setParamNormalized)(ctrl.as_void(), param_id, norm);
-                            }
-                        }
-                    }
                     self.in_param_changes
                         .push_point_rt(param_id, sample_offset as i32, norm);
                 }
@@ -818,12 +848,6 @@ impl PluginInstance for Vst3PluginInstance {
 
     fn save_state(&self) -> HostResult<Vec<u8>> {
         unsafe {
-            if let Some(ref ctrl) = self.controller {
-                for &(id, val) in &self.param_values {
-                    let _ = (ctrl.setParamNormalized)(ctrl.as_void(), id, val);
-                }
-            }
-
             let mut comp_stream = Vst3MemoryStream::new_empty();
             let comp_res =
                 (self.component.getState)(self.component.as_void(), comp_stream.as_ibstream_ptr());
@@ -835,7 +859,12 @@ impl PluginInstance for Vst3PluginInstance {
                 }
             }
 
-            if comp_res != kResultOk && comp_stream.data.is_empty() && ctrl_stream.data.is_empty() {
+            if comp_res != kResultOk
+                && comp_res != kResultFalse
+                && comp_res != kNotImplemented
+                && comp_stream.data.is_empty()
+                && ctrl_stream.data.is_empty()
+            {
                 return Err(HostError::StateError(format!(
                     "IComponent::getState failed with tresult {}",
                     comp_res

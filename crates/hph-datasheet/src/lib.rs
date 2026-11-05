@@ -70,6 +70,34 @@ fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
+fn is_instrument_plugin(instance: &dyn PluginInstance, in_ch: usize) -> bool {
+    let has_note_in = instance.note_ports().iter().any(|p| p.is_input);
+    if !has_note_in {
+        return false;
+    }
+    if in_ch == 0 {
+        return true;
+    }
+    instance.descriptor().features.iter().any(|f| {
+        let fl = f.to_ascii_lowercase();
+        fl.contains("instrument") || fl.contains("synth") || fl.contains("aumu")
+    })
+}
+
+fn default_instrument_midi_key(instance: &dyn PluginInstance) -> i16 {
+    let desc = instance.descriptor();
+    let is_drum = desc.name.to_ascii_lowercase().contains("drum")
+        || desc
+            .features
+            .iter()
+            .any(|f| f.to_ascii_lowercase().contains("drum"));
+    if is_drum {
+        36 // General MIDI C1 Bass Drum 1
+    } else {
+        69 // A4 (440 Hz)
+    }
+}
+
 pub fn measure_trace_snapshot(
     instance: &mut dyn PluginInstance,
     sample_rate: f64,
@@ -77,41 +105,97 @@ pub fn measure_trace_snapshot(
     label: String,
 ) -> HostResult<SweepTraceSnapshot> {
     let (in_ch, out_ch) = infer_channel_counts(instance);
+    let is_inst = is_instrument_plugin(instance, in_ch);
+    let inst_key = default_instrument_midi_key(instance);
+    let mut inst_events = events.to_vec();
+    if is_inst
+        && !inst_events
+            .iter()
+            .any(|e| matches!(e, ProcessEvent::NoteOn { .. }))
+    {
+        inst_events.push(ProcessEvent::NoteOn {
+            sample_offset: 0,
+            port_index: 0,
+            channel: 0,
+            key: inst_key,
+            note_id: 1,
+            velocity: 0.85,
+        });
+    }
 
-    // 1. Small-Signal Impulse -> Linear Bode Response (with 8192-sample parameter-smoothing warm-up)
+    // 1. Small-Signal Impulse -> Linear Bode Response (with parameter-smoothing warm-up and PDC latency compensation)
     let n_warmup = 8192usize;
     let n_ir = 16384usize;
     let silence = vec![vec![0.0f32; n_warmup]; in_ch];
     let impulse = generate_signal(
         &SignalSpec::Impulse {
             offset_samples: 0,
-            amplitude: 1e-3,
+            amplitude: if in_ch == 0 { 1.0 } else { 1e-3 },
         },
         sample_rate,
         n_ir,
     );
-    let ir_in = vec![impulse.clone(); in_ch];
     let mut flush_out = Vec::new();
     instance.activate(sample_rate, 1, 512)?;
     instance.start_processing()?;
     instance.reset();
+    let lat = (instance.latency_samples().unwrap_or(0) as usize).min(65536);
+    let total_ir = n_ir + lat;
+    let mut ir_padded = impulse.clone();
+    ir_padded.resize(total_ir, 0.0);
+    let ir_in = vec![ir_padded; in_ch];
     let _ = instance.flush_params(events, &mut flush_out);
     let (warm_out, _, _) = process_audio_stream(instance, &silence, out_ch, n_warmup, 256, events)?;
     let dc_baseline = warm_out
         .first()
         .and_then(|ch| ch.last().copied())
         .unwrap_or(0.0);
-    let (ir_out, _, _) = process_audio_stream(instance, &ir_in, out_ch, n_ir, 256, &[])?;
+    let ir_trigger_events: &[ProcessEvent] = if in_ch == 0 { &inst_events } else { &[] };
+    let (ir_out, _, _) =
+        process_audio_stream(instance, &ir_in, out_ch, total_ir, 256, ir_trigger_events)?;
     instance.stop_processing();
     instance.deactivate();
-    let ir_clean: Vec<f32> = ir_out[0].iter().map(|&s| s - dc_baseline).collect();
-    let bode = compute_bode_response(&impulse, &ir_clean, sample_rate);
+    let ir_slice = &ir_out[0][lat..lat + n_ir];
+    let ir_clean: Vec<f32> = ir_slice.iter().map(|&s| s - dc_baseline).collect();
+    let mut bode = compute_bode_response(&impulse, &ir_clean, sample_rate);
 
-    // 2. 1 kHz Sine -> THD+N
-    let n_sine = (sample_rate.round() as usize).max(16384);
+    // Fallback to -12 dBFS Log-Sine Sweep when a 1-sample Dirac impulse is rejected
+    // by a de-clicker (RX De-click), noise gate (kHs Gate), or zero-phase ring modulator (MRingModulator)
+    if in_ch > 0 && !is_inst && bode.max_gain_db < -60.0 {
+        let sweep = generate_signal(
+            &SignalSpec::LogSweep {
+                start_hz: 20.0,
+                end_hz: 20000.0,
+                amplitude: 0.25,
+            },
+            sample_rate,
+            n_ir,
+        );
+        let mut sw_padded = sweep.clone();
+        sw_padded.resize(total_ir, 0.0);
+        let sw_in = vec![sw_padded; in_ch];
+        instance.activate(sample_rate, 1, 512)?;
+        instance.start_processing()?;
+        instance.reset();
+        let _ = instance.flush_params(events, &mut flush_out);
+        let _ = process_audio_stream(instance, &silence, out_ch, n_warmup, 256, events)?;
+        let (sw_out, _, _) = process_audio_stream(instance, &sw_in, out_ch, total_ir, 256, &[])?;
+        instance.stop_processing();
+        instance.deactivate();
+        let sw_slice = &sw_out[0][lat..lat + n_ir];
+        let sw_clean: Vec<f32> = sw_slice.iter().map(|&s| s - dc_baseline).collect();
+        let sw_bode = compute_bode_response(&sweep, &sw_clean, sample_rate);
+        if sw_bode.max_gain_db > bode.max_gain_db {
+            bode = sw_bode;
+        }
+    }
+
+    // 2. 1 kHz Sine (or 440 Hz A4 MIDI NoteOn for Instruments) -> THD+N & Spectrum
+    let n_sine = (sample_rate.round() as usize).max(16384) + lat;
+    let probe_freq = if is_inst { 440.0 } else { 1000.0 };
     let sine = generate_signal(
         &SignalSpec::Sine {
-            freq_hz: 1000.0,
+            freq_hz: probe_freq,
             amplitude: 0.5,
             phase_rad: 0.0,
         },
@@ -123,30 +207,43 @@ pub fn measure_trace_snapshot(
     instance.start_processing()?;
     instance.reset();
     let _ = instance.flush_params(events, &mut flush_out);
-    let (sine_out, _, _) = process_audio_stream(instance, &sine_in, out_ch, n_sine, 256, events)?;
+    let (sine_out, _, _) =
+        process_audio_stream(instance, &sine_in, out_ch, n_sine, 256, &inst_events)?;
     instance.stop_processing();
     instance.deactivate();
-    let steady = if sine_out[0].len() > 8192 {
-        &sine_out[0][4096..]
+    let steady_start = if is_inst && inst_key == 36 {
+        lat.min(sine_out[0].len().saturating_sub(4096))
     } else {
-        &sine_out[0][..]
+        (lat + 4096).min(sine_out[0].len().saturating_sub(4096))
     };
-    let thdn = analyze_thdn(steady, sample_rate, 1000.0);
+    let steady = &sine_out[0][steady_start..];
+    let thdn = analyze_thdn(steady, sample_rate, probe_freq);
+
+    if bode.gain_1khz_db < -60.0 && thdn.fundamental_level_dbfs > -60.0 {
+        bode.gain_1khz_db = if is_inst {
+            thdn.fundamental_level_dbfs
+        } else {
+            thdn.fundamental_level_dbfs - linear_to_db(0.5)
+        };
+    }
 
     // 3. Dynamics Curve (-48 .. +24 dBFS)
     let dynamics = analyze_dynamics_envelope(sample_rate, |mono_stim| {
         let frames = mono_stim.len();
-        let in_bufs = vec![mono_stim.to_vec(); in_ch];
+        let total_frames = frames + lat;
+        let mut padded_stim = mono_stim.to_vec();
+        padded_stim.resize(total_frames, 0.0);
+        let in_bufs = vec![padded_stim; in_ch];
         let mut fl = Vec::new();
         let _ = instance.activate(sample_rate, 1, 512);
         let _ = instance.start_processing();
         instance.reset();
         let _ = instance.flush_params(events, &mut fl);
         let _ = process_audio_stream(instance, &silence, out_ch, n_warmup, 256, events);
-        let res = process_audio_stream(instance, &in_bufs, out_ch, frames, 256, &[]);
+        let res = process_audio_stream(instance, &in_bufs, out_ch, total_frames, 256, &[]);
         instance.stop_processing();
         instance.deactivate();
-        res.map(|(mut chs, _, _)| chs.swap_remove(0))
+        res.map(|(chs, _, _)| chs[0][lat..lat + frames].to_vec())
             .unwrap_or_else(|_| vec![0.0; frames])
     });
 
@@ -168,76 +265,77 @@ pub fn generate_plugin_datasheet(
     sweep_param: Option<u32>,
     base_events: &[ProcessEvent],
 ) -> HostResult<DatasheetReport> {
-    // Run 9-check validation & multi-block benchmark first
+    // Snapshot initial factory state and parameter values before validation mutates anything
+    let initial_state = if instance.supports_state() {
+        instance.save_state().ok()
+    } else {
+        None
+    };
     let param_infos = instance.params();
     let default_reset_events: Vec<ProcessEvent> = param_infos
         .iter()
-        .map(|p| ProcessEvent::ParamValue {
-            sample_offset: 0,
-            param_id: p.id,
-            note_id: -1,
-            port_index: 0,
-            channel: 0,
-            key: 0,
-            value: p.default_value,
+        .filter(|p| {
+            if p.flags.is_readonly || p.flags.is_hidden || (p.flags.raw_bits & (1 << 15)) != 0 {
+                return false;
+            }
+            let name_lc = p.name.to_ascii_lowercase();
+            !name_lc.contains("preset")
+                && !name_lc.contains("program")
+                && !name_lc.contains("midi cc")
+                && !name_lc.contains("trigger")
+        })
+        .take(32)
+        .map(|p| {
+            let init_val = instance.get_param_value(p.id).unwrap_or(p.default_value);
+            ProcessEvent::ParamValue {
+                sample_offset: 0,
+                param_id: p.id,
+                note_id: -1,
+                port_index: -1,
+                channel: -1,
+                key: -1,
+                value: init_val,
+            }
         })
         .collect();
 
-    let validation = run_full_validation(instance, sample_rate);
+    // Activate in pristine state first to capture metadata, active parameter table, and offscreen GUI screenshot
     let mut flush_out = Vec::new();
-    let _ = instance.flush_params(&default_reset_events, &mut flush_out);
-    let _ = instance.flush_params(base_events, &mut flush_out);
-
-    let benchmark = run_benchmarks(
-        instance,
-        &[sample_rate],
-        &[64, 128, 256, 512, 1024],
-        60,
-        false,
-    )?;
-
     let _ = instance.activate(sample_rate, 1, 1024);
     let _ = instance.start_processing();
     instance.reset();
-    let _ = instance.flush_params(&default_reset_events, &mut flush_out);
-    let _ = instance.flush_params(base_events, &mut flush_out);
+    if !base_events.is_empty() {
+        let _ = instance.flush_params(base_events, &mut flush_out);
+    }
     let descriptor = instance.descriptor().clone();
     let audio_ports = instance.audio_ports();
     let note_ports = instance.note_ports();
     let mut param_rows = Vec::new();
-    for p in &param_infos {
-        let cur = instance.get_param_value(p.id).unwrap_or(p.default_value);
-        let txt = instance
-            .param_value_to_text(p.id, cur)
-            .unwrap_or_else(|| format!("{cur:.3}"));
+    for (idx, p) in param_infos.iter().enumerate() {
+        let cur = if idx < 32 {
+            instance.get_param_value(p.id).unwrap_or(p.default_value)
+        } else {
+            p.default_value
+        };
+        let txt = if idx < 32 {
+            instance
+                .param_value_to_text(p.id, cur)
+                .unwrap_or_else(|| format!("{cur:.3}"))
+        } else {
+            format!("{cur:.3}")
+        };
         param_rows.push((p.clone(), cur, txt));
     }
     let latency_samples = instance.latency_samples();
     let tail_samples = instance.tail_samples();
-
-    // Optional offscreen GUI screenshot embedded as base64 PNG (captured while instance is active/initialized)
-    let mut gui_data_uri: Option<(u32, u32, String)> = None;
-    if instance.supports_gui() {
-        let tmp_png =
-            std::env::temp_dir().join(format!("hph_datasheet_{}.png", std::process::id()));
-        if let Ok(shot) = capture_plugin_screenshot(instance, &tmp_png, 250, None) {
-            if let Ok(png_bytes) = std::fs::read(&tmp_png) {
-                gui_data_uri = Some((
-                    shot.width,
-                    shot.height,
-                    format!("data:image/png;base64,{}", base64_encode(&png_bytes)),
-                ));
-            }
-            let _ = std::fs::remove_file(&tmp_png);
-        }
-    }
-
     instance.stop_processing();
     instance.deactivate();
 
     let (in_ch, out_ch) = infer_channel_counts(instance);
+    let is_inst = is_instrument_plugin(instance, in_ch);
+    let inst_key = default_instrument_midi_key(instance);
 
-    // Primary trace snapshot
+    // Primary trace snapshot (measured on pristine factory instance before validation/GUI)
     let primary =
         measure_trace_snapshot(instance, sample_rate, base_events, descriptor.name.clone())?;
 
@@ -256,10 +354,25 @@ pub fn generate_plugin_datasheet(
         n_sec,
     );
     let tt_in = vec![two_tone; in_ch];
+    let mut tt_events = base_events.to_vec();
+    if is_inst
+        && !tt_events
+            .iter()
+            .any(|e| matches!(e, ProcessEvent::NoteOn { .. }))
+    {
+        tt_events.push(ProcessEvent::NoteOn {
+            sample_offset: 0,
+            port_index: 0,
+            channel: 0,
+            key: inst_key,
+            note_id: 1,
+            velocity: 0.85,
+        });
+    }
     instance.activate(sample_rate, 1, 512)?;
     instance.start_processing()?;
     instance.reset();
-    let (tt_out, _, _) = process_audio_stream(instance, &tt_in, out_ch, n_sec, 256, base_events)?;
+    let (tt_out, _, _) = process_audio_stream(instance, &tt_in, out_ch, n_sec, 256, &tt_events)?;
     instance.stop_processing();
     instance.deactivate();
     let tt_steady = if tt_out[0].len() > 8192 {
@@ -285,11 +398,35 @@ pub fn generate_plugin_datasheet(
         n_tail,
     );
     let imp_in = vec![impulse.clone(); in_ch];
+    let mut imp_events = base_events.to_vec();
+    if is_inst
+        && !imp_events
+            .iter()
+            .any(|e| matches!(e, ProcessEvent::NoteOn { .. }))
+    {
+        let gate_len = ((0.05 * sample_rate).round() as u32).max(512);
+        imp_events.push(ProcessEvent::NoteOn {
+            sample_offset: 0,
+            port_index: 0,
+            channel: 0,
+            key: inst_key,
+            note_id: 1,
+            velocity: 0.85,
+        });
+        imp_events.push(ProcessEvent::NoteOff {
+            sample_offset: gate_len,
+            port_index: 0,
+            channel: 0,
+            key: inst_key,
+            note_id: 1,
+            velocity: 0.0,
+        });
+    }
     instance.activate(sample_rate, 1, 512)?;
     instance.start_processing()?;
     instance.reset();
     let (imp_out, _, _) =
-        process_audio_stream(instance, &imp_in, out_ch, n_tail, 256, base_events)?;
+        process_audio_stream(instance, &imp_in, out_ch, n_tail, 256, &imp_events)?;
     instance.stop_processing();
     instance.deactivate();
     let primary_rt60 = analyze_rt60(&imp_out[0], sample_rate);
@@ -349,6 +486,50 @@ pub fn generate_plugin_datasheet(
     } else {
         None
     };
+
+    // Run 9-category validation & DSP benchmarks BEFORE spinning up any GUI threads
+    let validation = run_full_validation(instance, sample_rate);
+    if let Some(ref bytes) = initial_state {
+        let _ = instance.load_state(bytes);
+    }
+    let _ = instance.flush_params(&default_reset_events, &mut flush_out);
+    if !base_events.is_empty() {
+        let _ = instance.flush_params(base_events, &mut flush_out);
+    }
+
+    let benchmark = run_benchmarks(
+        instance,
+        &[sample_rate],
+        &[64, 128, 256, 512, 1024],
+        60,
+        false,
+    )?;
+
+    // Restore pristine initial state & capture offscreen GUI screenshot last
+    if let Some(ref bytes) = initial_state {
+        let _ = instance.load_state(bytes);
+    }
+    let _ = instance.activate(sample_rate, 1, 1024);
+    let _ = instance.start_processing();
+    instance.reset();
+    let _ = instance.flush_params(&default_reset_events, &mut flush_out);
+    if !base_events.is_empty() {
+        let _ = instance.flush_params(base_events, &mut flush_out);
+    }
+    let mut gui_data_uri: Option<(u32, u32, String)> = None;
+    let tmp_png = std::env::temp_dir().join(format!("hph_datasheet_{}.png", std::process::id()));
+    if let Ok(shot) = capture_plugin_screenshot(instance, &tmp_png, 250, None) {
+        if let Ok(png_bytes) = std::fs::read(&tmp_png) {
+            gui_data_uri = Some((
+                shot.width,
+                shot.height,
+                format!("data:image/png;base64,{}", base64_encode(&png_bytes)),
+            ));
+        }
+        let _ = std::fs::remove_file(&tmp_png);
+    }
+    instance.stop_processing();
+    instance.deactivate();
 
     let fingerprint = DatasheetFingerprint {
         frequency_shaping_active: (primary.bode.max_gain_db - primary.bode.min_gain_db).abs() > 0.5

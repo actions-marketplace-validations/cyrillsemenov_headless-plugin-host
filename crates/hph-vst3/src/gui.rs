@@ -7,6 +7,9 @@ use std::ptr;
 
 impl PluginGui for Vst3PluginInstance {
     fn supports_gui(&self) -> bool {
+        if self.plug_view.is_some() {
+            return true;
+        }
         let Some(ref ctrl) = self.controller else {
             return false;
         };

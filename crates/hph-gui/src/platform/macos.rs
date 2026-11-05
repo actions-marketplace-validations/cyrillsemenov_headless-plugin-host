@@ -294,12 +294,6 @@ pub fn capture_plugin_screenshot(
     warmup_ms: u64,
     custom_size: Option<(u32, u32)>,
 ) -> HostResult<GuiScreenshotResult> {
-    if !plugin.supports_gui() {
-        return Err(HostError::Unsupported(
-            "Plugin does not support embedded Cocoa GUI".into(),
-        ));
-    }
-
     let mtm = MainThreadMarker::new().ok_or_else(|| {
         HostError::GuiError("GUI screenshot must be called on the macOS main thread".into())
     })?;
@@ -418,7 +412,13 @@ pub fn benchmark_plugin_gui(
     plugin: &mut dyn PluginInstance,
     frames_to_pump: usize,
 ) -> HostResult<GuiBenchmarkReport> {
-    if !plugin.supports_gui() {
+    let mtm = MainThreadMarker::new().ok_or_else(|| {
+        HostError::GuiError("GUI benchmark must run on the macOS main thread".into())
+    })?;
+    let _app = ensure_headless_nsapp(mtm);
+
+    let t0 = Instant::now();
+    if plugin.gui_create().is_err() {
         return Ok(GuiBenchmarkReport {
             supported: false,
             initial_size: (0, 0),
@@ -432,14 +432,6 @@ pub fn benchmark_plugin_gui(
             capture_rgba_latency_us: 0.0,
         });
     }
-
-    let mtm = MainThreadMarker::new().ok_or_else(|| {
-        HostError::GuiError("GUI benchmark must run on the macOS main thread".into())
-    })?;
-    let _app = ensure_headless_nsapp(mtm);
-
-    let t0 = Instant::now();
-    plugin.gui_create()?;
     let create_latency_us = t0.elapsed().as_secs_f64() * 1e6;
 
     let (w, h) = plugin.gui_get_size().unwrap_or((640, 480));

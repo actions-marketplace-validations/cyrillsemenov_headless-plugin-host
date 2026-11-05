@@ -230,7 +230,7 @@ fi
 if [ -n "$SUITE_FILE" ]; then
   echo "::group::7. Running Declarative TOML Suite ($SUITE_FILE)"
   set +e
-  ${GUI_WRAPPER[@]+"${GUI_WRAPPER[@]}"} "$HPH" suite "$SUITE_FILE" | tee "$REPORTS_DIR/suite.txt"
+  ${GUI_WRAPPER[@]+"${GUI_WRAPPER[@]}"} "$HPH" suite run "$SUITE_FILE" | tee "$REPORTS_DIR/suite.txt"
   SUITE_EXIT=$?
   set -e
   if [ $SUITE_EXIT -ne 0 ]; then

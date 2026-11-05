@@ -660,32 +660,16 @@ impl PluginInstance for AuPluginInstance {
                     param_id,
                     value,
                     ..
-                } => {
-                    unsafe {
-                        let _ = AudioUnitSetParameter(
-                            self.unit,
-                            param_id,
-                            kAudioUnitScope_Global,
-                            0,
-                            value as f32,
-                            sample_offset,
-                        );
-                    }
-                    if self.param_event_scratch.len() < self.param_event_scratch.capacity() {
-                        self.param_event_scratch.push(AudioUnitParameterEvent {
-                            scope: kAudioUnitScope_Global,
-                            element: 0,
-                            parameter: param_id,
-                            eventType: kParameterEvent_Immediate,
-                            eventValues: AUParameterEventValues {
-                                immediate: AUParameterEventImmediate {
-                                    bufferOffset: sample_offset,
-                                    value: value as f32,
-                                },
-                            },
-                        });
-                    }
-                }
+                } => unsafe {
+                    let _ = AudioUnitSetParameter(
+                        self.unit,
+                        param_id,
+                        kAudioUnitScope_Global,
+                        0,
+                        value as f32,
+                        sample_offset,
+                    );
+                },
                 ProcessEvent::NoteOn {
                     sample_offset,
                     channel,

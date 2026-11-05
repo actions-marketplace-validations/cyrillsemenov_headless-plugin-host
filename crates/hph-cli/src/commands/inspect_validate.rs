@@ -119,6 +119,8 @@ pub fn run_validate(
             report.passed_checks, report.total_checks, report.failed_checks
         );
     }
+    drop(instance);
+    drop(bundle);
     if report.failed_checks > 0 {
         std::process::exit(1);
     }
@@ -258,6 +260,8 @@ pub fn run_fuzz(
             );
         }
     }
+    drop(instance);
+    drop(bundle);
     if !report.passed {
         std::process::exit(1);
     }
@@ -275,11 +279,17 @@ pub fn run_screenshot(
 ) -> Result<()> {
     let bundle = load_plugin_bundle(plugin)?;
     let mut instance = bundle.create_instance(id)?;
+    let _ = instance.activate(48000.0, 1, 1024);
+    let _ = instance.start_processing();
+    instance.reset();
     let custom_size = match (width, height) {
         (Some(w), Some(h)) => Some((w, h)),
         _ => None,
     };
-    let res = capture_plugin_screenshot(&mut *instance, output, warmup_ms, custom_size)?;
+    let res = capture_plugin_screenshot(&mut *instance, output, warmup_ms, custom_size);
+    instance.stop_processing();
+    instance.deactivate();
+    let res = res?;
     if json_output {
         println!("{}", serde_json::to_string_pretty(&res)?);
     } else {

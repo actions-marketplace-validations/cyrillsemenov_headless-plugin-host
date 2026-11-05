@@ -233,7 +233,8 @@ pub fn analyze_thdn(samples: &[f32], sample_rate: f64, fundamental_hz: f64) -> T
 
     let norm = 2.0 / ((n as f64) * coherent_gain.max(1e-12));
     let bin_hz = sample_rate / (n as f64);
-    let fund_bin = ((fundamental_hz / bin_hz).round() as usize).clamp(1, spec.len() - 1);
+    let min_bin = ((20.0 / bin_hz).ceil() as usize).max(1);
+    let nominal_fund_bin = ((fundamental_hz / bin_hz).round() as usize).clamp(1, spec.len() - 1);
 
     // Blackman-Harris mainlobe half-width is 4 bins
     let lobe_radius = 4usize;
@@ -248,6 +249,26 @@ pub fn analyze_thdn(samples: &[f32], sample_rate: f64, fundamental_hz: f64) -> T
         }
         p
     };
+
+    // Auto-track fundamental if plugin pitch-shifts, quantizes pitch (e.g. Auto-Tune), or runs an internal oscillator
+    let nominal_power = bin_power(nominal_fund_bin);
+    let mut best_bin = nominal_fund_bin;
+    let mut best_bin_mag_sq = 0.0f64;
+    for (b, c) in spec.iter().enumerate().skip(min_bin) {
+        let m = c.norm() * norm;
+        let p = m * m;
+        if p > best_bin_mag_sq {
+            best_bin_mag_sq = p;
+            best_bin = b;
+        }
+    }
+    let best_lobe_power = bin_power(best_bin);
+    let (fund_bin, actual_fundamental_hz) =
+        if best_lobe_power > 1e-8 && nominal_power < best_lobe_power * 0.1 {
+            (best_bin, (best_bin as f64) * bin_hz)
+        } else {
+            (nominal_fund_bin, fundamental_hz)
+        };
 
     let fund_power = bin_power(fund_bin).max(1e-30);
     let fund_amp = fund_power.sqrt();
@@ -266,7 +287,7 @@ pub fn analyze_thdn(samples: &[f32], sample_rate: f64, fundamental_hz: f64) -> T
     harmonic_bins_mask[fund_start..=fund_end].fill(true);
 
     for order in 2..=10 {
-        let h_freq = fundamental_hz * (order as f64);
+        let h_freq = actual_fundamental_hz * (order as f64);
         if h_freq >= sample_rate * 0.5 {
             break;
         }
@@ -292,7 +313,6 @@ pub fn analyze_thdn(samples: &[f32], sample_rate: f64, fundamental_hz: f64) -> T
     }
 
     // Total non-fundamental power (20 Hz .. Nyquist) and max non-harmonic alias spur
-    let min_bin = ((20.0 / bin_hz).ceil() as usize).max(1);
     let mut thdn_power = 0.0;
     let mut max_alias_power: f64 = 1e-30;
 
@@ -308,17 +328,34 @@ pub fn analyze_thdn(samples: &[f32], sample_rate: f64, fundamental_hz: f64) -> T
         }
     }
 
-    let thd_ratio = (harmonic_power_sum / fund_power).sqrt();
-    let even_thd_ratio = (even_harmonic_power_sum / fund_power).sqrt();
-    let odd_thd_ratio = (odd_harmonic_power_sum / fund_power).sqrt();
-    let thdn_ratio = (thdn_power / fund_power).sqrt();
+    let total_power = fund_power + thdn_power;
+    let (thd_ratio, even_thd_ratio, odd_thd_ratio, thdn_ratio) = if total_power < 1e-12 {
+        (0.0, 0.0, 0.0, 0.0)
+    } else {
+        let thd_denom = if harmonic_power_sum <= fund_power {
+            fund_power
+        } else {
+            fund_power + harmonic_power_sum
+        };
+        let thdn_denom = if thdn_power <= fund_power {
+            fund_power
+        } else {
+            total_power
+        };
+        (
+            (harmonic_power_sum / thd_denom).sqrt(),
+            (even_harmonic_power_sum / thd_denom).sqrt(),
+            (odd_harmonic_power_sum / thd_denom).sqrt(),
+            (thdn_power / thdn_denom).sqrt(),
+        )
+    };
     let thd_db = linear_to_db(thd_ratio);
     let even_thd_db = linear_to_db(even_thd_ratio);
     let odd_thd_db = linear_to_db(odd_thd_ratio);
     let thdn_db = linear_to_db(thdn_ratio);
 
     ThdNReport {
-        fundamental_freq_hz: fundamental_hz,
+        fundamental_freq_hz: actual_fundamental_hz,
         fundamental_level_dbfs: linear_to_db(fund_amp),
         thd_percent: thd_ratio * 100.0,
         thd_db,
@@ -328,7 +365,7 @@ pub fn analyze_thdn(samples: &[f32], sample_rate: f64, fundamental_hz: f64) -> T
         thdn_db,
         sinad_db: -thdn_db,
         harmonics,
-        max_alias_spur_dbc: 10.0 * (max_alias_power / fund_power).log10(),
+        max_alias_spur_dbc: 10.0 * (max_alias_power / fund_power.max(total_power)).log10(),
     }
 }
 
