@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering;
 
 use crate::allocator::{ALLOC_CALLS, BYTES_ALLOCATED, FREE_CALLS, RT_GUARD_ARMED};
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 use crate::platform;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +57,7 @@ impl RtAllocGuard {
         }
     }
 
+    #[allow(unused_mut)]
     pub fn finish(self) -> RtAllocStats {
         RT_GUARD_ARMED.with(|c| c.set(false));
         let mut alloc_calls = ALLOC_CALLS

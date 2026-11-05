@@ -35,13 +35,14 @@ pub struct MockX11State {
 }
 
 impl MockX11State {
+    #[allow(clippy::missing_transmute_annotations)]
     pub unsafe fn create(
         host: *const clap_host_t,
         parent_win: Window,
         width: u32,
         height: u32,
     ) -> Option<Self> {
-        let handle = libc::dlopen(b"libX11.so.6\0".as_ptr() as *const c_char, libc::RTLD_LAZY);
+        let handle = libc::dlopen(c"libX11.so.6".as_ptr(), libc::RTLD_LAZY);
         if handle.is_null() {
             return None;
         }

@@ -1,3 +1,5 @@
+#![allow(clippy::upper_case_acronyms)]
+
 use crate::{save_rgba_png, GuiBenchmarkReport, GuiScreenshotResult};
 use hph_core::{HostError, HostResult, PluginInstance};
 use std::path::Path;
@@ -343,25 +345,25 @@ unsafe fn capture_hwnd_rgba(
     pump_win32_messages();
 
     // Try PrintWindow first, fallback to BitBlt
-    if PrintWindow(hwnd, mem_dc, PW_RENDERFULLCONTENT) == 0 {
-        if PrintWindow(hwnd, mem_dc, 0) == 0 {
-            let _ = BitBlt(
-                mem_dc,
-                0,
-                0,
-                width as i32,
-                height as i32,
-                win_dc,
-                0,
-                0,
-                SRCCOPY,
-            );
-        }
+    if PrintWindow(hwnd, mem_dc, PW_RENDERFULLCONTENT) == 0 && PrintWindow(hwnd, mem_dc, 0) == 0 {
+        let _ = BitBlt(
+            mem_dc,
+            0,
+            0,
+            width as i32,
+            height as i32,
+            win_dc,
+            0,
+            0,
+            SRCCOPY,
+        );
     }
 
     let num_bytes = (width * height * 4) as usize;
     let has_pixels = |buf: &[u8]| -> bool {
-        buf.chunks_exact(4)
+        buf.as_chunks::<4>()
+            .0
+            .iter()
             .any(|px| px[0] > 0 || px[1] > 0 || px[2] > 0)
     };
     let print_flags = PRF_CLIENT | PRF_CHILDREN | PRF_OWNED;
@@ -448,7 +450,9 @@ pub fn capture_plugin_screenshot(
         let capture_time_us = t_cap.elapsed().as_secs_f64() * 1e6;
 
         let non_blank_pixels = rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|px| px[0] > 0 || px[1] > 0 || px[2] > 0)
             .count();
 

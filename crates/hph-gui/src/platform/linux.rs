@@ -100,8 +100,9 @@ unsafe extern "C" fn ignore_x11_error(_dpy: *mut Display, _err: *mut c_void) -> 
 }
 
 impl XlibFns {
+    #[allow(clippy::missing_transmute_annotations)]
     unsafe fn load() -> HostResult<Self> {
-        let handle = libc::dlopen(b"libX11.so.6\0".as_ptr() as *const c_char, libc::RTLD_LAZY);
+        let handle = libc::dlopen(c"libX11.so.6".as_ptr(), libc::RTLD_LAZY);
         if handle.is_null() {
             return Err(HostError::GuiError(
                 "Failed to dlopen libX11.so.6 (is X11 installed?)".into(),
@@ -349,7 +350,9 @@ pub fn capture_plugin_screenshot(
         (x11.close_display)(dpy);
 
         let non_blank_pixels = rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|px| px[0] != 0 || px[1] != 0 || px[2] != 0)
             .count();
 
