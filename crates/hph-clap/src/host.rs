@@ -642,7 +642,7 @@ unsafe extern "C" fn host_audio_ports_config_rescan(host: *const clap_host_t) {
 
 const HOST_NAME: &[u8] = b"headless-plugin-host\0";
 const HOST_VENDOR: &[u8] = b"hph\0";
-const HOST_URL: &[u8] = b"https://github.com/afab/headless-plugin-host\0";
+const HOST_URL: &[u8] = b"https://github.com/cyrillsemenov/headless-plugin-host\0";
 const HOST_VERSION: &[u8] = b"0.1.0\0";
 
 impl ClapHostContext {

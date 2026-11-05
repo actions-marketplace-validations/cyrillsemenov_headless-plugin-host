@@ -38,9 +38,9 @@ pub static MOCK_DESCRIPTOR: SyncDescriptor = SyncDescriptor(clap_plugin_descript
     id: c"com.hph.mock-filter-saturator".as_ptr(),
     name: c"HPH Mock Filter & Saturator".as_ptr(),
     vendor: c"HPH Audio Labs".as_ptr(),
-    url: c"https://github.com/afab/headless-plugin-host".as_ptr(),
-    manual_url: c"https://github.com/afab/headless-plugin-host".as_ptr(),
-    support_url: c"https://github.com/afab/headless-plugin-host".as_ptr(),
+    url: c"https://github.com/cyrillsemenov/headless-plugin-host".as_ptr(),
+    manual_url: c"https://github.com/cyrillsemenov/headless-plugin-host".as_ptr(),
+    support_url: c"https://github.com/cyrillsemenov/headless-plugin-host".as_ptr(),
     version: c"1.0.0".as_ptr(),
     description:
         c"Reference CLAP test plugin with SVF filter, saturator, synth voice and Cocoa GUI".as_ptr(),
