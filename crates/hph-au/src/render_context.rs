@@ -5,6 +5,7 @@ use std::ptr;
 /// Pre-allocated context passed into `AURenderCallback` and `HostCallbackInfo` during `AudioUnitRender`.
 pub(crate) struct AuRenderContext {
     pub(crate) input_ptrs: Vec<*const f32>,
+    pub(crate) in_bus_offsets: Vec<(usize, usize)>,
     pub(crate) num_input_channels: usize,
     pub(crate) num_frames: usize,
     pub(crate) sample_rate: f64,
@@ -15,7 +16,7 @@ pub(crate) unsafe extern "C" fn au_render_input_callback(
     in_ref_con: *mut c_void,
     io_action_flags: *mut AudioUnitRenderActionFlags,
     _in_time_stamp: *const AudioTimeStamp,
-    _in_bus_number: UInt32,
+    in_bus_number: UInt32,
     in_number_frames: UInt32,
     io_data: *mut AudioBufferList,
 ) -> OSStatus {
@@ -28,7 +29,13 @@ pub(crate) unsafe extern "C" fn au_render_input_callback(
     let frames = (in_number_frames as usize).min(ctx.num_frames);
     let byte_len = frames * std::mem::size_of::<f32>();
 
-    if ctx.num_input_channels == 0 {
+    let (bus_offset, bus_ch_count) = ctx
+        .in_bus_offsets
+        .get(in_bus_number as usize)
+        .copied()
+        .unwrap_or((0, ctx.num_input_channels));
+
+    if ctx.num_input_channels == 0 || bus_offset >= ctx.num_input_channels || bus_ch_count == 0 {
         if !io_action_flags.is_null() {
             *io_action_flags |= kAudioUnitRenderAction_OutputIsSilence;
         }
@@ -41,9 +48,12 @@ pub(crate) unsafe extern "C" fn au_render_input_callback(
         return noErr;
     }
 
+    let avail_ch = (ctx.num_input_channels - bus_offset)
+        .min(bus_ch_count)
+        .max(1);
     for b in 0..num_buffers {
         let buf = &mut *buffers_ptr.add(b);
-        let src_ch = b % ctx.num_input_channels;
+        let src_ch = bus_offset + (b % avail_ch);
         let src_ptr = ctx.input_ptrs[src_ch];
         if !buf.mData.is_null() && !src_ptr.is_null() && frames > 0 {
             ptr::copy_nonoverlapping(src_ptr, buf.mData as *mut f32, frames);

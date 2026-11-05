@@ -135,15 +135,24 @@ pub fn compute_spectrum(
         (best_bin as f64) * bin_hz
     };
 
-    // Collect local maxima for top_peaks
+    // Collect local maxima for top_peaks with parabolic sub-bin interpolation
     let mut peaks = Vec::new();
     for bin in 1..mags_db.len().saturating_sub(1) {
         if mags_db[bin] > mags_db[bin - 1]
             && mags_db[bin] >= mags_db[bin + 1]
             && mags_db[bin] > -140.0
         {
+            let a = mags_db[bin - 1];
+            let b = mags_db[bin];
+            let g = mags_db[bin + 1];
+            let denom = a - 2.0 * b + g;
+            let delta = if denom.abs() > 1e-12 {
+                0.5 * (a - g) / denom
+            } else {
+                0.0
+            };
             peaks.push(SpectralPeak {
-                freq_hz: (bin as f64) * bin_hz,
+                freq_hz: ((bin as f64) + delta.clamp(-0.5, 0.5)) * bin_hz,
                 magnitude_db: mags_db[bin],
                 bin,
             });
@@ -660,4 +669,52 @@ pub fn compute_bode_response(
         max_gain_db,
         min_gain_db,
     }
+}
+
+/// Compute a 31-band ISO 1/3-octave spectral envelope (`(freq_hz, magnitude_dbfs)`) from a steady-state
+/// audio buffer (e.g. an instrument note sustain) by integrating band energy within `[f * 2^(-1/6), f * 2^(+1/6)]`.
+pub fn compute_third_octave_envelope(samples: &[f32], sample_rate: f64) -> Vec<(f64, f64)> {
+    let n = samples.len().max(64);
+    let win = make_window(WindowType::BlackmanHarris, n);
+    let coherent_gain: f64 = win.iter().sum::<f64>() / (n as f64);
+
+    let mut planner = RealFftPlanner::<f64>::new();
+    let r2c = planner.plan_fft_forward(n);
+    let mut input: Vec<f64> = samples
+        .iter()
+        .zip(win.iter())
+        .map(|(&s, &w)| (s as f64) * w)
+        .collect();
+    let mut spec = r2c.make_output_vec();
+    let _ = r2c.process(&mut input, &mut spec);
+
+    let norm = 2.0 / ((n as f64) * coherent_gain.max(1e-12));
+    let bin_hz = sample_rate / (n as f64);
+    let half_band_ratio = 2.0f64.powf(1.0 / 6.0);
+
+    let probe_freqs: &[f64] = &[
+        20.0, 25.0, 31.5, 40.0, 50.0, 63.0, 80.0, 100.0, 125.0, 160.0, 200.0, 250.0, 315.0, 400.0,
+        500.0, 630.0, 800.0, 1000.0, 1250.0, 1600.0, 2000.0, 2500.0, 3150.0, 4000.0, 5000.0,
+        6300.0, 8000.0, 10000.0, 12500.0, 16000.0, 20000.0,
+    ];
+
+    let mut out = Vec::with_capacity(probe_freqs.len());
+    for &f in probe_freqs {
+        if f >= sample_rate * 0.48 {
+            continue;
+        }
+        let f_lo = f / half_band_ratio;
+        let f_hi = f * half_band_ratio;
+        let b_lo = ((f_lo / bin_hz).floor() as usize).clamp(1, spec.len() - 1);
+        let b_hi = ((f_hi / bin_hz).ceil() as usize).clamp(b_lo, spec.len() - 1);
+        let mut peak_mag = 0.0f64;
+        for c in &spec[b_lo..=b_hi] {
+            let m = c.norm() * norm;
+            if m > peak_mag {
+                peak_mag = m;
+            }
+        }
+        out.push((f, linear_to_db(peak_mag).clamp(-140.0, 40.0)));
+    }
+    out
 }

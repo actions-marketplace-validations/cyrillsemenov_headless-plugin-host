@@ -507,7 +507,8 @@ unsafe fn activate_all_buses(component: &ComPtr<Steinberg_Vst_IComponent>) {
                     if (component.getBusInfo)(component.as_void(), media_type, dir, idx, &mut info)
                         == kResultOk
                     {
-                        let should_activate = info.busType == Steinberg_Vst_BusTypes_kMain
+                        let should_activate = media_type == Steinberg_Vst_MediaTypes_kAudio
+                            || info.busType == Steinberg_Vst_BusTypes_kMain
                             || (info.flags & Steinberg_Vst_BusInfo_BusFlags_kDefaultActive) != 0;
                         if should_activate {
                             let _ = (component.activateBus)(

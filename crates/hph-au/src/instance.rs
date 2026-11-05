@@ -21,8 +21,9 @@ pub struct AuPluginInstance {
     pub(crate) is_initialized: bool,
     pub(crate) sample_rate: f64,
     pub(crate) max_frames: u32,
-    pub(crate) input_channels: u32,
     pub(crate) output_channels: u32,
+    pub(crate) in_bus_channels: Vec<u32>,
+    pub(crate) out_bus_channels: Vec<u32>,
     pub(crate) cached_params: Vec<ParamInfo>,
     pub(crate) render_ctx: Box<AuRenderContext>,
     /// Pre-allocated raw byte buffer aligned for `AudioBufferList` with up to 32 channels
@@ -42,16 +43,31 @@ impl AuPluginInstance {
         entry: AuComponentEntry,
         unit: AudioUnit,
     ) -> HostResult<Self> {
-        let (in_ch, out_ch) = Self::probe_bus_channels(unit, entry.desc.componentType);
+        let (in_bus_channels, out_bus_channels) =
+            Self::probe_bus_channels(unit, entry.desc.componentType);
+        let in_ch = in_bus_channels.first().copied().unwrap_or(0);
+        let out_ch = out_bus_channels.first().copied().unwrap_or(2).max(1);
+        let total_in_ch: usize = in_bus_channels.iter().map(|&c| c as usize).sum();
+        let total_out_ch: usize = out_bus_channels.iter().map(|&c| c as usize).sum();
+
+        let mut in_bus_offsets = Vec::with_capacity(in_bus_channels.len());
+        let mut off = 0usize;
+        for &c in &in_bus_channels {
+            let cnt = c as usize;
+            in_bus_offsets.push((off, cnt));
+            off += cnt;
+        }
+
         let render_ctx = Box::new(AuRenderContext {
-            input_ptrs: vec![ptr::null(); in_ch.max(8) as usize],
+            input_ptrs: vec![ptr::null(); total_in_ch.max(16)],
+            in_bus_offsets,
             num_input_channels: in_ch as usize,
             num_frames: 0,
             sample_rate: 48000.0,
             sample_time: 0.0,
         });
 
-        let max_ch = out_ch.max(16) as usize;
+        let max_ch = total_out_ch.max(out_ch as usize).max(16);
         let abl_bytes =
             std::mem::size_of::<AudioBufferList>() + max_ch * std::mem::size_of::<AudioBuffer>();
         let abl_words = abl_bytes.div_ceil(8);
@@ -63,8 +79,9 @@ impl AuPluginInstance {
             is_initialized: false,
             sample_rate: 48000.0,
             max_frames: 1024,
-            input_channels: in_ch,
-            output_channels: out_ch.max(1),
+            output_channels: out_ch,
+            in_bus_channels,
+            out_bus_channels,
             cached_params: Vec::new(),
             render_ctx,
             out_abl_storage: vec![0u64; abl_words],
@@ -99,25 +116,27 @@ impl AuPluginInstance {
             );
         }
 
-        if self.input_channels > 0 {
+        if !self.in_bus_channels.is_empty() {
             let render_cb = AURenderCallbackStruct {
                 inputProc: Some(au_render_input_callback),
                 inputProcRefCon: ctx_ptr,
             };
-            unsafe {
-                let _ = AudioUnitSetProperty(
-                    self.unit,
-                    kAudioUnitProperty_SetRenderCallback,
-                    kAudioUnitScope_Input,
-                    0,
-                    &render_cb as *const _ as *const c_void,
-                    std::mem::size_of::<AURenderCallbackStruct>() as u32,
-                );
+            for bus_idx in 0..self.in_bus_channels.len() {
+                unsafe {
+                    let _ = AudioUnitSetProperty(
+                        self.unit,
+                        kAudioUnitProperty_SetRenderCallback,
+                        kAudioUnitScope_Input,
+                        bus_idx as u32,
+                        &render_cb as *const _ as *const c_void,
+                        std::mem::size_of::<AURenderCallbackStruct>() as u32,
+                    );
+                }
             }
         }
     }
 
-    fn probe_bus_channels(unit: AudioUnit, comp_type: OSType) -> (u32, u32) {
+    fn probe_bus_channels(unit: AudioUnit, comp_type: OSType) -> (Vec<u32>, Vec<u32>) {
         unsafe {
             let mut in_buses: u32 = 0;
             let mut size = std::mem::size_of::<u32>() as u32;
@@ -153,14 +172,15 @@ impl AuPluginInstance {
                 out_buses = 1;
             }
 
-            let in_ch = if in_buses > 0 {
+            let mut in_vec = Vec::with_capacity(in_buses as usize);
+            for idx in 0..in_buses {
                 let mut asbd = AudioStreamBasicDescription::default();
                 let mut asbd_size = std::mem::size_of::<AudioStreamBasicDescription>() as u32;
-                if AudioUnitGetProperty(
+                let ch = if AudioUnitGetProperty(
                     unit,
                     kAudioUnitProperty_StreamFormat,
                     kAudioUnitScope_Input,
-                    0,
+                    idx,
                     &mut asbd as *mut _ as *mut c_void,
                     &mut asbd_size,
                 ) == noErr
@@ -169,19 +189,19 @@ impl AuPluginInstance {
                     asbd.mChannelsPerFrame
                 } else {
                     2
-                }
-            } else {
-                0
-            };
+                };
+                in_vec.push(ch);
+            }
 
-            let out_ch = if out_buses > 0 {
+            let mut out_vec = Vec::with_capacity(out_buses.max(1) as usize);
+            for idx in 0..out_buses.max(1) {
                 let mut asbd = AudioStreamBasicDescription::default();
                 let mut asbd_size = std::mem::size_of::<AudioStreamBasicDescription>() as u32;
-                if AudioUnitGetProperty(
+                let ch = if AudioUnitGetProperty(
                     unit,
                     kAudioUnitProperty_StreamFormat,
                     kAudioUnitScope_Output,
-                    0,
+                    idx,
                     &mut asbd as *mut _ as *mut c_void,
                     &mut asbd_size,
                 ) == noErr
@@ -190,12 +210,11 @@ impl AuPluginInstance {
                     asbd.mChannelsPerFrame
                 } else {
                     2
-                }
-            } else {
-                2
-            };
+                };
+                out_vec.push(ch);
+            }
 
-            (in_ch, out_ch)
+            (in_vec, out_vec)
         }
     }
 
@@ -337,89 +356,63 @@ impl PluginInstance for AuPluginInstance {
 
     fn audio_ports(&self) -> Vec<AudioPortInfo> {
         let mut ports = Vec::new();
-        unsafe {
-            let mut in_buses: u32 = if self.input_channels > 0 { 1 } else { 0 };
-            let mut out_buses: u32 = if self.output_channels > 0 { 1 } else { 0 };
-            let mut u32_size = std::mem::size_of::<u32>() as u32;
-            let _ = AudioUnitGetProperty(
-                self.unit,
-                kAudioUnitProperty_ElementCount,
-                kAudioUnitScope_Input,
-                0,
-                &mut in_buses as *mut _ as *mut c_void,
-                &mut u32_size,
-            );
-            u32_size = std::mem::size_of::<u32>() as u32;
-            let _ = AudioUnitGetProperty(
-                self.unit,
-                kAudioUnitProperty_ElementCount,
-                kAudioUnitScope_Output,
-                0,
-                &mut out_buses as *mut _ as *mut c_void,
-                &mut u32_size,
-            );
+        let in_buses = self.in_bus_channels.len() as u32;
+        let out_buses = self.out_bus_channels.len() as u32;
 
-            for idx in 0..in_buses {
-                let ch = if idx == 0 {
-                    self.input_channels.max(1)
+        for (idx_usize, &ch_raw) in self.in_bus_channels.iter().enumerate() {
+            let idx = idx_usize as u32;
+            let ch = ch_raw.max(1);
+            ports.push(AudioPortInfo {
+                id: idx,
+                index: idx,
+                name: if idx == 0 {
+                    "Input".into()
                 } else {
-                    2
-                };
-                ports.push(AudioPortInfo {
-                    id: idx,
-                    index: idx,
-                    name: if idx == 0 {
-                        "Input".into()
-                    } else {
-                        format!("Sidechain / Aux In {idx}")
-                    },
-                    is_input: true,
-                    channel_count: ch,
-                    is_main: idx == 0,
-                    port_type: if ch == 1 {
-                        "mono".into()
-                    } else {
-                        "stereo".into()
-                    },
-                    in_place_pair_id: if idx == 0 && out_buses > 0 {
-                        Some(0)
-                    } else {
-                        None
-                    },
-                    prefers_64bit: false,
-                });
-            }
+                    format!("Sidechain / Aux In {idx}")
+                },
+                is_input: true,
+                channel_count: ch,
+                is_main: idx == 0,
+                port_type: match ch {
+                    1 => "mono".into(),
+                    2 => "stereo".into(),
+                    n => format!("{n}ch"),
+                },
+                in_place_pair_id: if idx == 0 && out_buses > 0 {
+                    Some(0)
+                } else {
+                    None
+                },
+                prefers_64bit: false,
+            });
+        }
 
-            for idx in 0..out_buses {
-                let ch = if idx == 0 {
-                    self.output_channels.max(1)
+        for (idx_usize, &ch_raw) in self.out_bus_channels.iter().enumerate() {
+            let idx = idx_usize as u32;
+            let ch = ch_raw.max(1);
+            ports.push(AudioPortInfo {
+                id: idx,
+                index: idx,
+                name: if idx == 0 {
+                    "Output".into()
                 } else {
-                    2
-                };
-                ports.push(AudioPortInfo {
-                    id: idx,
-                    index: idx,
-                    name: if idx == 0 {
-                        "Output".into()
-                    } else {
-                        format!("Aux Out {idx}")
-                    },
-                    is_input: false,
-                    channel_count: ch,
-                    is_main: idx == 0,
-                    port_type: if ch == 1 {
-                        "mono".into()
-                    } else {
-                        "stereo".into()
-                    },
-                    in_place_pair_id: if idx == 0 && in_buses > 0 {
-                        Some(0)
-                    } else {
-                        None
-                    },
-                    prefers_64bit: false,
-                });
-            }
+                    format!("Aux Out {idx}")
+                },
+                is_input: false,
+                channel_count: ch,
+                is_main: idx == 0,
+                port_type: match ch {
+                    1 => "mono".into(),
+                    2 => "stereo".into(),
+                    n => format!("{n}ch"),
+                },
+                in_place_pair_id: if idx == 0 && in_buses > 0 {
+                    Some(0)
+                } else {
+                    None
+                },
+                prefers_64bit: false,
+            });
         }
         ports
     }
@@ -558,49 +551,53 @@ impl PluginInstance for AuPluginInstance {
                 std::mem::size_of::<u32>() as u32,
             );
 
-            if self.input_channels > 0 {
+            for (bus_idx, &ch_count) in self.in_bus_channels.iter().enumerate() {
+                if ch_count > 0 {
+                    let _ = AudioUnitSetProperty(
+                        self.unit,
+                        kAudioUnitProperty_SampleRate,
+                        kAudioUnitScope_Input,
+                        bus_idx as u32,
+                        &sample_rate as *const _ as *const c_void,
+                        std::mem::size_of::<f64>() as u32,
+                    );
+                    let in_asbd = AudioStreamBasicDescription::canonical_non_interleaved_f32(
+                        sample_rate,
+                        ch_count,
+                    );
+                    let _ = AudioUnitSetProperty(
+                        self.unit,
+                        kAudioUnitProperty_StreamFormat,
+                        kAudioUnitScope_Input,
+                        bus_idx as u32,
+                        &in_asbd as *const _ as *const c_void,
+                        std::mem::size_of::<AudioStreamBasicDescription>() as u32,
+                    );
+                }
+            }
+
+            for (bus_idx, &ch_count) in self.out_bus_channels.iter().enumerate() {
                 let _ = AudioUnitSetProperty(
                     self.unit,
                     kAudioUnitProperty_SampleRate,
-                    kAudioUnitScope_Input,
-                    0,
+                    kAudioUnitScope_Output,
+                    bus_idx as u32,
                     &sample_rate as *const _ as *const c_void,
                     std::mem::size_of::<f64>() as u32,
                 );
-                let in_asbd = AudioStreamBasicDescription::canonical_non_interleaved_f32(
+                let out_asbd = AudioStreamBasicDescription::canonical_non_interleaved_f32(
                     sample_rate,
-                    self.input_channels,
+                    ch_count.max(1),
                 );
                 let _ = AudioUnitSetProperty(
                     self.unit,
                     kAudioUnitProperty_StreamFormat,
-                    kAudioUnitScope_Input,
-                    0,
-                    &in_asbd as *const _ as *const c_void,
+                    kAudioUnitScope_Output,
+                    bus_idx as u32,
+                    &out_asbd as *const _ as *const c_void,
                     std::mem::size_of::<AudioStreamBasicDescription>() as u32,
                 );
             }
-
-            let _ = AudioUnitSetProperty(
-                self.unit,
-                kAudioUnitProperty_SampleRate,
-                kAudioUnitScope_Output,
-                0,
-                &sample_rate as *const _ as *const c_void,
-                std::mem::size_of::<f64>() as u32,
-            );
-            let out_asbd = AudioStreamBasicDescription::canonical_non_interleaved_f32(
-                sample_rate,
-                self.output_channels,
-            );
-            let _ = AudioUnitSetProperty(
-                self.unit,
-                kAudioUnitProperty_StreamFormat,
-                kAudioUnitScope_Output,
-                0,
-                &out_asbd as *const _ as *const c_void,
-                std::mem::size_of::<AudioStreamBasicDescription>() as u32,
-            );
 
             self.setup_host_callbacks();
 
@@ -727,15 +724,28 @@ impl PluginInstance for AuPluginInstance {
             }
         }
 
-        let out_ch_count = buffers.outputs.len().max(1);
+        let total_out_slices = buffers.outputs.len().max(1);
         let byte_size = (num_frames * std::mem::size_of::<f32>()) as u32;
 
         unsafe {
             let abl_ptr = self.out_abl_storage.as_mut_ptr() as *mut AudioBufferList;
-            (*abl_ptr).mNumberBuffers = out_ch_count as u32;
             let bufs_ptr = (*abl_ptr).mBuffers.as_mut_ptr();
+            let time_stamp = AudioTimeStamp {
+                mSampleTime: self.render_ctx.sample_time,
+                mFlags: kAudioTimeStampSampleTimeValid,
+                ..Default::default()
+            };
 
-            for (ch_idx, out_slice) in buffers.outputs.iter_mut().enumerate() {
+            let main_out_ch = if self.out_bus_channels.len() > 1
+                && total_out_slices > (self.output_channels as usize)
+            {
+                (self.output_channels as usize).min(total_out_slices).max(1)
+            } else {
+                total_out_slices
+            };
+
+            (*abl_ptr).mNumberBuffers = main_out_ch as u32;
+            for (ch_idx, out_slice) in buffers.outputs.iter_mut().take(main_out_ch).enumerate() {
                 (*bufs_ptr.add(ch_idx)) = AudioBuffer {
                     mNumberChannels: 1,
                     mDataByteSize: byte_size,
@@ -744,12 +754,6 @@ impl PluginInstance for AuPluginInstance {
             }
 
             let mut action_flags: AudioUnitRenderActionFlags = 0;
-            let time_stamp = AudioTimeStamp {
-                mSampleTime: self.render_ctx.sample_time,
-                mFlags: kAudioTimeStampSampleTimeValid,
-                ..Default::default()
-            };
-
             let status = AudioUnitRender(
                 self.unit,
                 &mut action_flags,
@@ -758,6 +762,38 @@ impl PluginInstance for AuPluginInstance {
                 num_frames as u32,
                 abl_ptr,
             );
+
+            if status == noErr && self.out_bus_channels.len() > 1 && total_out_slices > main_out_ch
+            {
+                let mut ch_offset = main_out_ch;
+                for (bus_idx, &bus_ch_u32) in self.out_bus_channels.iter().enumerate().skip(1) {
+                    let bus_ch = (bus_ch_u32 as usize).max(1);
+                    if ch_offset + bus_ch > total_out_slices {
+                        break;
+                    }
+                    (*abl_ptr).mNumberBuffers = bus_ch as u32;
+                    for (local_ch, out_slice) in buffers.outputs[ch_offset..ch_offset + bus_ch]
+                        .iter_mut()
+                        .enumerate()
+                    {
+                        (*bufs_ptr.add(local_ch)) = AudioBuffer {
+                            mNumberChannels: 1,
+                            mDataByteSize: byte_size,
+                            mData: out_slice.as_mut_ptr() as *mut c_void,
+                        };
+                    }
+                    let mut aux_flags: AudioUnitRenderActionFlags = 0;
+                    let _ = AudioUnitRender(
+                        self.unit,
+                        &mut aux_flags,
+                        &time_stamp,
+                        bus_idx as u32,
+                        num_frames as u32,
+                        abl_ptr,
+                    );
+                    ch_offset += bus_ch;
+                }
+            }
 
             self.render_ctx.sample_time += num_frames as f64;
 

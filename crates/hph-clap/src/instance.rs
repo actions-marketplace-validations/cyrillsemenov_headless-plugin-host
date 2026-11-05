@@ -20,8 +20,14 @@ pub struct ClapPluginInstance {
     pub(crate) is_processing: bool,
     pub(crate) gui_created: bool,
     pub(crate) param_cookies: HashMap<u32, *mut c_void>,
+    pub(crate) in_port_channel_counts: Vec<usize>,
+    pub(crate) out_port_channel_counts: Vec<usize>,
     pub(crate) scratch_in_ptrs: Vec<*mut f32>,
     pub(crate) scratch_out_ptrs: Vec<*mut f32>,
+    pub(crate) scratch_dummy_in: Vec<Vec<f32>>,
+    pub(crate) scratch_dummy_out: Vec<Vec<f32>>,
+    pub(crate) scratch_in_bufs: Vec<clap_audio_buffer_t>,
+    pub(crate) scratch_out_bufs: Vec<clap_audio_buffer_t>,
     pub(crate) scratch_in_events: ClapInputEventQueue,
 }
 
@@ -317,6 +323,57 @@ impl PluginInstance for ClapPluginInstance {
         if self.is_active {
             return Ok(());
         }
+        let ports = self.audio_ports();
+        if ports.is_empty() {
+            self.in_port_channel_counts = vec![2];
+            self.out_port_channel_counts = vec![2];
+        } else {
+            self.in_port_channel_counts = ports
+                .iter()
+                .filter(|p| p.is_input)
+                .map(|p| (p.channel_count as usize).max(1))
+                .collect();
+            self.out_port_channel_counts = ports
+                .iter()
+                .filter(|p| !p.is_input)
+                .map(|p| (p.channel_count as usize).max(1))
+                .collect();
+            if self.out_port_channel_counts.is_empty() {
+                self.out_port_channel_counts.push(2);
+            }
+        }
+        let total_in_ch: usize = self.in_port_channel_counts.iter().sum();
+        let total_out_ch: usize = self.out_port_channel_counts.iter().sum();
+        let max_f = (max_frames as usize).max(256);
+        self.scratch_in_ptrs = vec![ptr::null_mut(); total_in_ch.max(16)];
+        self.scratch_out_ptrs = vec![ptr::null_mut(); total_out_ch.max(16)];
+        self.scratch_dummy_in = (0..total_in_ch.max(16))
+            .map(|_| vec![0.0f32; max_f])
+            .collect();
+        self.scratch_dummy_out = (0..total_out_ch.max(16))
+            .map(|_| vec![0.0f32; max_f])
+            .collect();
+        self.scratch_in_bufs = vec![
+            clap_audio_buffer_t {
+                data32: ptr::null_mut(),
+                data64: ptr::null_mut(),
+                channel_count: 0,
+                latency: 0,
+                constant_mask: 0,
+            };
+            self.in_port_channel_counts.len()
+        ];
+        self.scratch_out_bufs = vec![
+            clap_audio_buffer_t {
+                data32: ptr::null_mut(),
+                data64: ptr::null_mut(),
+                channel_count: 0,
+                latency: 0,
+                constant_mask: 0,
+            };
+            self.out_port_channel_counts.len()
+        ];
+
         unsafe {
             let act_fn = (*self.plugin).activate.ok_or_else(|| {
                 HostError::ActivationError("`plugin.activate` pointer is null".into())
@@ -429,38 +486,47 @@ impl PluginInstance for ClapPluginInstance {
                 HostError::ProcessError("`plugin.process` pointer is null".into())
             })?;
 
-            self.scratch_in_ptrs.clear();
-            for ch in buffers.inputs {
-                self.scratch_in_ptrs.push(ch.as_ptr() as *mut f32);
-            }
-            self.scratch_out_ptrs.clear();
-            for ch in buffers.outputs.iter_mut() {
-                self.scratch_out_ptrs.push(ch.as_mut_ptr());
+            let mut in_offset = 0usize;
+            for (port_idx, &ch_count) in self.in_port_channel_counts.iter().enumerate() {
+                for ch in 0..ch_count {
+                    let global_ch = in_offset + ch;
+                    let ptr = if global_ch < buffers.inputs.len() {
+                        buffers.inputs[global_ch].as_ptr() as *mut f32
+                    } else {
+                        self.scratch_dummy_in[global_ch].as_mut_ptr()
+                    };
+                    self.scratch_in_ptrs[global_ch] = ptr;
+                }
+                self.scratch_in_bufs[port_idx] = clap_audio_buffer_t {
+                    data32: self.scratch_in_ptrs.as_mut_ptr().add(in_offset),
+                    data64: ptr::null_mut(),
+                    channel_count: ch_count as u32,
+                    latency: 0,
+                    constant_mask: 0,
+                };
+                in_offset += ch_count;
             }
 
-            let in_audio_buf = clap_audio_buffer_t {
-                data32: if self.scratch_in_ptrs.is_empty() {
-                    ptr::null_mut()
-                } else {
-                    self.scratch_in_ptrs.as_mut_ptr()
-                },
-                data64: ptr::null_mut(),
-                channel_count: self.scratch_in_ptrs.len() as u32,
-                latency: 0,
-                constant_mask: 0,
-            };
-
-            let mut out_audio_buf = clap_audio_buffer_t {
-                data32: if self.scratch_out_ptrs.is_empty() {
-                    ptr::null_mut()
-                } else {
-                    self.scratch_out_ptrs.as_mut_ptr()
-                },
-                data64: ptr::null_mut(),
-                channel_count: self.scratch_out_ptrs.len() as u32,
-                latency: 0,
-                constant_mask: 0,
-            };
+            let mut out_offset = 0usize;
+            for (port_idx, &ch_count) in self.out_port_channel_counts.iter().enumerate() {
+                for ch in 0..ch_count {
+                    let global_ch = out_offset + ch;
+                    let ptr = if global_ch < buffers.outputs.len() {
+                        buffers.outputs[global_ch].as_mut_ptr()
+                    } else {
+                        self.scratch_dummy_out[global_ch].as_mut_ptr()
+                    };
+                    self.scratch_out_ptrs[global_ch] = ptr;
+                }
+                self.scratch_out_bufs[port_idx] = clap_audio_buffer_t {
+                    data32: self.scratch_out_ptrs.as_mut_ptr().add(out_offset),
+                    data64: ptr::null_mut(),
+                    channel_count: ch_count as u32,
+                    latency: 0,
+                    constant_mask: 0,
+                };
+                out_offset += ch_count;
+            }
 
             self.scratch_in_events
                 .populate(in_events, &self.param_cookies);
@@ -503,26 +569,18 @@ impl PluginInstance for ClapPluginInstance {
                 steady_time: buffers.steady_time,
                 frames_count: buffers.num_frames as u32,
                 transport: &transport,
-                audio_inputs: if self.scratch_in_ptrs.is_empty() {
+                audio_inputs: if self.scratch_in_bufs.is_empty() {
                     ptr::null()
                 } else {
-                    &in_audio_buf
+                    self.scratch_in_bufs.as_ptr()
                 },
-                audio_outputs: if self.scratch_out_ptrs.is_empty() {
+                audio_outputs: if self.scratch_out_bufs.is_empty() {
                     ptr::null_mut()
                 } else {
-                    &mut out_audio_buf
+                    self.scratch_out_bufs.as_mut_ptr()
                 },
-                audio_inputs_count: if self.scratch_in_ptrs.is_empty() {
-                    0
-                } else {
-                    1
-                },
-                audio_outputs_count: if self.scratch_out_ptrs.is_empty() {
-                    0
-                } else {
-                    1
-                },
+                audio_inputs_count: self.scratch_in_bufs.len() as u32,
+                audio_outputs_count: self.scratch_out_bufs.len() as u32,
                 in_events: &clap_in,
                 out_events: &clap_out,
             };

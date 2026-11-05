@@ -297,8 +297,14 @@ impl PluginBundle for ClapBundle {
                 is_processing: false,
                 gui_created: false,
                 param_cookies: HashMap::new(),
+                in_port_channel_counts: Vec::new(),
+                out_port_channel_counts: Vec::new(),
                 scratch_in_ptrs: Vec::with_capacity(16),
                 scratch_out_ptrs: Vec::with_capacity(16),
+                scratch_dummy_in: Vec::new(),
+                scratch_dummy_out: Vec::new(),
+                scratch_in_bufs: Vec::with_capacity(8),
+                scratch_out_bufs: Vec::with_capacity(8),
                 scratch_in_events: ClapInputEventQueue::with_capacity(256),
             };
             instance.refresh_param_cookies();

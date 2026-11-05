@@ -767,8 +767,8 @@ impl PluginInstance for Vst3PluginInstance {
         for (bus_idx, &ch_count) in self.in_bus_channel_counts.iter().enumerate() {
             for ch in 0..ch_count {
                 let global_ch = ptr_offset + ch;
-                let ptr = if bus_idx == 0 && ch < buffers.inputs.len() {
-                    buffers.inputs[ch].as_ptr() as *mut f32
+                let ptr = if global_ch < buffers.inputs.len() {
+                    buffers.inputs[global_ch].as_ptr() as *mut f32
                 } else {
                     self.scratch_dummy_in[global_ch].as_mut_ptr()
                 };
@@ -785,8 +785,8 @@ impl PluginInstance for Vst3PluginInstance {
         for (bus_idx, &ch_count) in self.out_bus_channel_counts.iter().enumerate() {
             for ch in 0..ch_count {
                 let global_ch = out_ptr_offset + ch;
-                let ptr = if bus_idx == 0 && ch < buffers.outputs.len() {
-                    buffers.outputs[ch].as_mut_ptr()
+                let ptr = if global_ch < buffers.outputs.len() {
+                    buffers.outputs[global_ch].as_mut_ptr()
                 } else {
                     self.scratch_dummy_out[global_ch].as_mut_ptr()
                 };

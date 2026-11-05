@@ -2,7 +2,9 @@ use crate::svg_plot::{
     render_svg_bar_chart, render_svg_linear_xy_chart, render_svg_log_freq_chart, xml_escape,
     BarItem, PlotTrace, PRINT_PALETTE,
 };
-use crate::{DatasheetFingerprint, SweepTraceSnapshot};
+use crate::{
+    DatasheetFingerprint, InstrumentSweepReport, MultiBusRoutingReport, SweepTraceSnapshot,
+};
 use hph_core::*;
 use hph_dsp::*;
 use hph_validate::*;
@@ -26,6 +28,8 @@ pub fn build_printable_html_datasheet(
     rt60: &Rt60Report,
     delay: &DelayReport,
     stereo: &StereoReport,
+    multibus: &MultiBusRoutingReport,
+    instrument_sweep: Option<&InstrumentSweepReport>,
     sweep_traces: &[SweepTraceSnapshot],
     ref_snap: Option<&SweepTraceSnapshot>,
 ) -> String {
@@ -158,6 +162,28 @@ pub fn build_printable_html_datasheet(
                 .static_curve
                 .iter()
                 .map(|p| (p.input_dbfs, p.output_dbfs))
+                .collect(),
+        });
+    }
+    if let Some(ref sc_dyn) = multibus.sidechain_dynamics {
+        dyn_io_traces.push(PlotTrace {
+            label: "Sidechain-Keyed (Aux In)".into(),
+            color: "#7c3aed",
+            dashed: true,
+            points: sc_dyn
+                .static_curve
+                .iter()
+                .map(|p| (p.input_dbfs, p.output_dbfs))
+                .collect(),
+        });
+        dyn_gain_traces.push(PlotTrace {
+            label: "Sidechain-Keyed (Aux In)".into(),
+            color: "#7c3aed",
+            dashed: true,
+            points: sc_dyn
+                .static_curve
+                .iter()
+                .map(|p| (p.input_dbfs, p.gain_db))
                 .collect(),
         });
     }
@@ -430,6 +456,25 @@ pub fn build_printable_html_datasheet(
             r#"<span class="badge badge-info">Reverberant / Delay Tail</span>"#
         );
     }
+    if multibus.has_sidechain_input {
+        let _ = writeln!(
+            html,
+            r#"<span class="badge badge-info">Sidechain / Key Input</span>"#
+        );
+    }
+    if multibus.has_aux_outputs {
+        let _ = writeln!(
+            html,
+            r#"<span class="badge badge-info">Multi-Bus Outputs ({} Active)</span>"#,
+            multibus.active_output_stems
+        );
+    }
+    if instrument_sweep.is_some() {
+        let _ = writeln!(
+            html,
+            r#"<span class="badge badge-info">MIDI / CLAP Instrument</span>"#
+        );
+    }
     let _ = writeln!(html, r#"  </div>"#);
 
     let _ = writeln!(
@@ -455,11 +500,11 @@ pub fn build_printable_html_datasheet(
     let _ = writeln!(
         html,
         r#"  <div class="section">
-    <h2 class="section-title">1. Plugin Topology, Parameters &amp; Visual Interface</h2>
+    <h2 class="section-title">1. Plugin Topology, Multi-Bus Routing, Parameters &amp; Visual Interface</h2>
     <div class="grid-2">
       <div>
         <table>
-          <thead><tr><th>Port</th><th>Direction</th><th>Channels</th><th>Type</th><th>PDC / Tail</th></tr></thead>
+          <thead><tr><th>Port</th><th>Role</th><th>Ch</th><th>Measured Activity</th><th>PDC / Tail</th></tr></thead>
           <tbody>"#
     );
     let lat_str = match latency_samples {
@@ -472,17 +517,46 @@ pub fn build_printable_html_datasheet(
         Some(n) => format!("{n} smp"),
         None => "N/A".to_string(),
     };
-    for p in audio_ports {
+    for b in multibus
+        .input_buses
+        .iter()
+        .chain(multibus.output_buses.iter())
+    {
+        let role = match (b.is_input, b.is_main) {
+            (true, true) => "MAIN IN",
+            (true, false) => "SIDECHAIN IN",
+            (false, true) => "MAIN OUT",
+            (false, false) => "AUX STEM OUT",
+        };
+        let level_str = match (b.measured_peak_dbfs, b.measured_rms_dbfs) {
+            (Some(pk), Some(rm)) if pk > -135.0 => format!("Pk {pk:+.1} / RMS {rm:+.1} dBFS"),
+            _ => "Silent (-140 dBFS)".to_string(),
+        };
         let _ = writeln!(
             html,
-            r#"            <tr><td>{}</td><td class="mono">{}</td><td class="mono">{}</td><td>{}</td><td class="mono">Lat={} / Tail={}</td></tr>"#,
-            xml_escape(&p.name),
-            if p.is_input { "INPUT" } else { "OUTPUT" },
-            p.channel_count,
-            xml_escape(&p.port_type),
+            r#"            <tr><td>{}</td><td class="mono">{}</td><td class="mono">{} ({})</td><td class="mono">{}</td><td class="mono">Lat={} / Tail={}</td></tr>"#,
+            xml_escape(&b.name),
+            role,
+            b.channel_count,
+            xml_escape(&b.port_type),
+            level_str,
             lat_str,
             tail_str
         );
+    }
+    if multibus.input_buses.is_empty() && multibus.output_buses.is_empty() {
+        for p in audio_ports {
+            let _ = writeln!(
+                html,
+                r#"            <tr><td>{}</td><td class="mono">{}</td><td class="mono">{}</td><td>{}</td><td class="mono">Lat={} / Tail={}</td></tr>"#,
+                xml_escape(&p.name),
+                if p.is_input { "INPUT" } else { "OUTPUT" },
+                p.channel_count,
+                xml_escape(&p.port_type),
+                lat_str,
+                tail_str
+            );
+        }
     }
     for np in note_ports {
         let _ = writeln!(
@@ -493,11 +567,37 @@ pub fn build_printable_html_datasheet(
             np.supported_dialects
         );
     }
+    let _ = writeln!(html, r#"          </tbody></table>"#);
+
+    if multibus.has_sidechain_input || multibus.has_aux_outputs {
+        let sc_str = match multibus.sidechain_ducking_db {
+            Some(d) => {
+                if let Some(ref pname) = multibus.sidechain_key_param_name {
+                    format!("{d:+.2} dB (via '{}')", xml_escape(pname))
+                } else {
+                    format!("{d:+.2} dB (Active @ 0 dBFS Key)")
+                }
+            }
+            None => "N/A".to_string(),
+        };
+        let _ = writeln!(
+            html,
+            r#"        <div style="margin-bottom:8px;padding:6px 8px;border:1px solid var(--border);background:var(--subtle);font-size:11px;">
+          <strong>Multi-Bus Routing &amp; Sidechain Excitation:</strong>
+          Input Buses: <code>{}</code> &nbsp;|&nbsp;
+          Output Buses: <code>{} ({} Active)</code> &nbsp;|&nbsp;
+          Sidechain Keying Delta: <code>{}</code>
+        </div>"#,
+            multibus.input_buses.len(),
+            multibus.output_buses.len(),
+            multibus.active_output_stems,
+            sc_str
+        );
+    }
+
     let _ = writeln!(
         html,
-        r#"          </tbody>
-        </table>
-        <table>
+        r#"        <table>
           <thead><tr><th>ID</th><th>Parameter Name</th><th>Range</th><th>Default</th><th>Active Value</th></tr></thead>
           <tbody>"#
     );
@@ -638,11 +738,163 @@ pub fn build_printable_html_datasheet(
         stereo.stereo_width
     );
 
-    // Section 6: Real-Time CPU Performance & 9-Point Validation Scorecard
+    // Optional Section: Instrument Multi-Register & Multi-Velocity Matrix
+    let perf_sec_num = if let Some(inst) = instrument_sweep {
+        let mut reg_spec_traces = Vec::new();
+        for (idx, reg) in inst.registers.iter().enumerate() {
+            if !reg.spectral_envelope.is_empty() {
+                reg_spec_traces.push(PlotTrace {
+                    label: format!(
+                        "{} (MIDI {} / {:.1} Hz)",
+                        reg.note_name, reg.midi_key, reg.nominal_freq_hz
+                    ),
+                    color: PRINT_PALETTE[idx % PRINT_PALETTE.len()],
+                    dashed: false,
+                    points: reg.spectral_envelope.clone(),
+                });
+            }
+        }
+        let svg_inst_registers = render_svg_log_freq_chart(
+            "Figure 6A — Multi-Register 1/3-Octave Spectral Envelope (C2, C3, C4, A4, C6 @ Vel 1.00)",
+            "dBFS",
+            &reg_spec_traces,
+            Some((-120.0, 10.0)),
+        );
+
+        let vel_labels = ["Vel 0.25 (pp)", "Vel 0.65 (mf)", "Vel 1.00 (ff)"];
+        let vel_colors = ["#0891b2", "#1d4ed8", "#dc2626"];
+        let mut vel_centroid_traces = Vec::new();
+        let mut max_cent = 1000.0f64;
+        for (v_idx, &v_lbl) in vel_labels.iter().enumerate() {
+            let mut pts = Vec::new();
+            for reg in &inst.registers {
+                if let Some(vp) = reg.velocity_points.get(v_idx) {
+                    max_cent = max_cent.max(vp.spectral_centroid_hz * 1.15);
+                    pts.push((reg.midi_key as f64, vp.spectral_centroid_hz));
+                }
+            }
+            vel_centroid_traces.push(PlotTrace {
+                label: v_lbl.to_string(),
+                color: vel_colors[v_idx],
+                dashed: v_idx == 0,
+                points: pts,
+            });
+        }
+        let svg_inst_velocity = render_svg_linear_xy_chart(
+            "Figure 6B — Velocity-to-Brightness Spectral Centroid (Hz) vs. MIDI Note Register (36 .. 84)",
+            "MIDI Note Key (C2=36 .. C6=84)",
+            "Hz",
+            &vel_centroid_traces,
+            (36.0, 84.0),
+            (0.0, max_cent.clamp(500.0, 20000.0)),
+            false,
+        );
+
+        let mode_str = if inst.is_percussive {
+            "Percussive / Drum Kit"
+        } else {
+            "Pitched Synthesizer / Sampler"
+        };
+        let _ = writeln!(
+            html,
+            r#"  <div class="section">
+    <h2 class="section-title">6. Instrument Multi-Register &amp; Multi-Velocity Matrix (C2 – C6 &times; pp / mf / ff)</h2>
+    <div style="margin-bottom:8px;color:#334155;">
+      <strong>Excitation Mode:</strong> <code>{}</code> &nbsp;|&nbsp;
+      <strong>Mean Pitch Error:</strong> <code>{:.2} cents</code> &nbsp;|&nbsp;
+      <strong>Max Velocity Dynamic Range (ff - pp):</strong> <code>{:.2} dB</code> &nbsp;|&nbsp;
+      <strong>Mean Brightness Tilt (ff / pp):</strong> <code>{:.2}x</code>
+    </div>
+    {svg_inst_registers}
+    {svg_inst_velocity}
+    <table>
+      <thead>
+        <tr>
+          <th>Register</th>
+          <th>Nominal f0</th>
+          <th>Measured f0 (Tracking)</th>
+          <th>Vel 0.25 (pp)</th>
+          <th>Vel 0.65 (mf)</th>
+          <th>Vel 1.00 (ff)</th>
+          <th>Dyn Range</th>
+          <th>Brightness Tilt</th>
+        </tr>
+      </thead>
+      <tbody>"#,
+            mode_str,
+            inst.mean_abs_pitch_error_cents,
+            inst.max_velocity_dynamic_range_db,
+            inst.mean_brightness_tilt_ratio
+        );
+
+        for reg in &inst.registers {
+            let track_str = if inst.is_percussive {
+                format!("{:.1} Hz (Percussive)", reg.measured_fundamental_hz)
+            } else if reg.pitch_tracked {
+                format!(
+                    "{:.2} Hz ({:+.1} cents)",
+                    reg.measured_fundamental_hz, reg.pitch_error_cents
+                )
+            } else {
+                format!(
+                    "{:.1} Hz ({:+.0} cents)",
+                    reg.measured_fundamental_hz, reg.pitch_error_cents
+                )
+            };
+            let fmt_vp = |idx: usize| -> String {
+                if let Some(vp) = reg.velocity_points.get(idx) {
+                    if vp.peak_dbfs <= -135.0 {
+                        "Silent".to_string()
+                    } else {
+                        format!(
+                            "{:+.1} dBFS / {:.0} Hz",
+                            vp.rms_dbfs, vp.spectral_centroid_hz
+                        )
+                    }
+                } else {
+                    "N/A".to_string()
+                }
+            };
+            let _ = writeln!(
+                html,
+                r#"        <tr>
+          <td><strong>{}</strong> <span class="mono">(MIDI {})</span></td>
+          <td class="mono">{:.2} Hz</td>
+          <td class="mono">{}</td>
+          <td class="mono">{}</td>
+          <td class="mono">{}</td>
+          <td class="mono">{}</td>
+          <td class="mono">{:.2} dB</td>
+          <td class="mono">{:.2}x</td>
+        </tr>"#,
+                xml_escape(&reg.note_name),
+                reg.midi_key,
+                reg.nominal_freq_hz,
+                track_str,
+                fmt_vp(0),
+                fmt_vp(1),
+                fmt_vp(2),
+                reg.velocity_dynamic_range_db,
+                reg.brightness_tilt_ratio
+            );
+        }
+
+        let _ = writeln!(
+            html,
+            r#"      </tbody>
+    </table>
+  </div>"#
+        );
+        7
+    } else {
+        6
+    };
+
+    // Real-Time CPU Performance & 9-Point Validation Scorecard
     let _ = writeln!(
         html,
         r#"  <div class="section">
-    <h2 class="section-title">6. Real-Time Audio Performance &amp; Validation Scorecard</h2>
+    <h2 class="section-title">{perf_sec_num}. Real-Time Audio Performance &amp; Validation Scorecard</h2>
     {svg_cpu}
     <table>
       <thead><tr><th>Status</th><th>Category</th><th>Check Name</th><th>Duration</th><th>Telemetry &amp; Findings</th></tr></thead>

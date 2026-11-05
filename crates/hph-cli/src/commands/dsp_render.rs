@@ -988,6 +988,24 @@ pub fn run_datasheet(
             report.primary_thdn.thdn_percent,
             report.primary_rt60.rt60_sec,
         );
+        if report.multibus.has_sidechain_input || report.multibus.has_aux_outputs {
+            println!(
+                "  Multi-Bus Routing: InBuses={}, OutBuses={} ({} active) | Sidechain Ducking={:?} dB",
+                report.multibus.input_buses.len(),
+                report.multibus.output_buses.len(),
+                report.multibus.active_output_stems,
+                report.multibus.sidechain_ducking_db,
+            );
+        }
+        if let Some(ref inst) = report.instrument_sweep {
+            println!(
+                "  Instrument Matrix: {} registers | Mean Pitch Error={:.2} cents, Max Vel DR={:.2} dB, Brightness Tilt={:.2}x",
+                inst.registers.len(),
+                inst.mean_abs_pitch_error_cents,
+                inst.max_velocity_dynamic_range_db,
+                inst.mean_brightness_tilt_ratio,
+            );
+        }
     }
 
     Ok(())

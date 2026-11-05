@@ -156,3 +156,115 @@ pub fn infer_channel_counts(plugin: &dyn PluginInstance) -> (usize, usize) {
         .unwrap_or(2);
     (in_ch, out_ch.max(1))
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MultiBusLayout {
+    pub main_in_channels: usize,
+    pub aux_in_channels: usize,
+    pub total_in_channels: usize,
+    pub in_bus_counts: Vec<usize>,
+    pub main_out_channels: usize,
+    pub aux_out_channels: usize,
+    pub total_out_channels: usize,
+    pub out_bus_counts: Vec<usize>,
+}
+
+pub fn infer_multibus_layout(plugin: &dyn PluginInstance) -> MultiBusLayout {
+    let ports = plugin.audio_ports();
+    if ports.is_empty() {
+        return MultiBusLayout {
+            main_in_channels: 2,
+            aux_in_channels: 0,
+            total_in_channels: 2,
+            in_bus_counts: vec![2],
+            main_out_channels: 2,
+            aux_out_channels: 0,
+            total_out_channels: 2,
+            out_bus_counts: vec![2],
+        };
+    }
+
+    let in_ports: Vec<_> = ports.iter().filter(|p| p.is_input).collect();
+    let out_ports: Vec<_> = ports.iter().filter(|p| !p.is_input).collect();
+
+    let in_bus_counts: Vec<usize> = in_ports
+        .iter()
+        .map(|p| (p.channel_count as usize).max(1))
+        .collect();
+    let main_in_channels = in_bus_counts.first().copied().unwrap_or(0);
+    let total_in_channels: usize = in_bus_counts.iter().sum();
+    let aux_in_channels = total_in_channels.saturating_sub(main_in_channels);
+
+    let mut out_bus_counts: Vec<usize> = out_ports
+        .iter()
+        .map(|p| (p.channel_count as usize).max(1))
+        .collect();
+    if out_bus_counts.is_empty() {
+        out_bus_counts.push(2);
+    }
+    let main_out_channels = out_bus_counts.first().copied().unwrap_or(2).max(1);
+    let total_out_channels: usize = out_bus_counts.iter().sum();
+    let aux_out_channels = total_out_channels.saturating_sub(main_out_channels);
+
+    MultiBusLayout {
+        main_in_channels,
+        aux_in_channels,
+        total_in_channels,
+        in_bus_counts,
+        main_out_channels,
+        aux_out_channels,
+        total_out_channels,
+        out_bus_counts,
+    }
+}
+
+/// Mix down multi-bus output channels (`total_out_channels`) into the main output bus (`main_out_channels`)
+/// when a multi-output instrument routes voices across auxiliary output stems `1..N` or when Bus 0 is silent.
+pub fn mix_down_output_buses(
+    out_channels: &[Vec<f32>],
+    layout: &MultiBusLayout,
+    sum_all_active_stems: bool,
+) -> Vec<Vec<f32>> {
+    let main_ch = layout.main_out_channels.max(1);
+    let frames = out_channels.first().map(|c| c.len()).unwrap_or(0);
+    let mut mixed: Vec<Vec<f32>> = (0..main_ch)
+        .map(|ch| {
+            out_channels
+                .get(ch)
+                .cloned()
+                .unwrap_or_else(|| vec![0.0f32; frames])
+        })
+        .collect();
+
+    if layout.out_bus_counts.len() <= 1 || out_channels.len() <= main_ch {
+        return mixed;
+    }
+
+    let main_energy: f64 = mixed
+        .iter()
+        .flat_map(|c| c.iter())
+        .map(|&s| (s as f64) * (s as f64))
+        .sum();
+    let main_silent = main_energy < 1e-12;
+
+    if !sum_all_active_stems && !main_silent {
+        return mixed;
+    }
+
+    let mut ch_offset = main_ch;
+    for &bus_ch in layout.out_bus_counts.iter().skip(1) {
+        if ch_offset + bus_ch > out_channels.len() {
+            break;
+        }
+        for local_ch in 0..bus_ch {
+            let src = &out_channels[ch_offset + local_ch];
+            let dst = &mut mixed[local_ch % main_ch];
+            for (d, &s) in dst.iter_mut().zip(src.iter()) {
+                *d += s;
+            }
+        }
+        ch_offset += bus_ch;
+    }
+
+    mixed
+}
