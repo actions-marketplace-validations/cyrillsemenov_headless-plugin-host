@@ -10,3 +10,6 @@ hph-dsp.workspace = true
 hph-validate.workspace = true
 toml_edit.workspace = true
 anyhow.workspace = true
+
+[lints]
+workspace = true

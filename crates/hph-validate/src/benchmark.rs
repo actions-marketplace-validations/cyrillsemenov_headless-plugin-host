@@ -87,7 +87,7 @@ pub fn run_benchmarks(
             plugin.stop_processing();
             plugin.deactivate();
 
-            times_us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            times_us.sort_by(f64::total_cmp);
             let mean_us = times_us.iter().sum::<f64>() / (n_iters as f64);
             let p50_us = times_us[n_iters / 2];
             let p90_us = times_us[(n_iters * 90) / 100];

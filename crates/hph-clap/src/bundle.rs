@@ -255,7 +255,12 @@ impl PluginBundle for ClapBundle {
             };
 
         let host_ctx = ClapHostContext::new_boxed();
-        let id_cstr = CString::new(target_desc.id.as_bytes()).unwrap();
+        let id_cstr = CString::new(target_desc.id.as_bytes()).map_err(|e| {
+            HostError::InitError(format!(
+                "Plugin ID '{}' contains interior NUL: {e}",
+                target_desc.id
+            ))
+        })?;
 
         unsafe {
             let create_fn = (*self.inner.factory)
