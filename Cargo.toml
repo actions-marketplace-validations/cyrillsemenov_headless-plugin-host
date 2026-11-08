@@ -59,3 +59,7 @@ objc2-foundation = { version = "0.2", features = ["all"] }
 objc2-app-kit = { version = "0.2", features = ["all"] }
 core-graphics = "0.24"
 core-foundation = "0.10"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

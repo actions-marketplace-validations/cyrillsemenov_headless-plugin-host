@@ -402,13 +402,12 @@ pub fn dispatch_tool_call(name: &str, args: &Value) -> Value {
 
 pub fn handle_jsonrpc_message(req: &Value) -> Option<Value> {
     let method = req.get("method").and_then(|m| m.as_str())?;
-    let id = req.get("id").cloned();
 
     // Notifications have no `id` and expect no response
-    if id.is_none() || method.starts_with("notifications/") {
+    if method.starts_with("notifications/") {
         return None;
     }
-    let id = id.unwrap();
+    let id = req.get("id")?.clone();
     let params = req.get("params").cloned().unwrap_or_else(|| json!({}));
 
     let result = match method {

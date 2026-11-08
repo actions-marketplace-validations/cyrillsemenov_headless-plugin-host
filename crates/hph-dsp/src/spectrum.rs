@@ -158,7 +158,7 @@ pub fn compute_spectrum(
             });
         }
     }
-    peaks.sort_by(|a, b| b.magnitude_db.partial_cmp(&a.magnitude_db).unwrap());
+    peaks.sort_by(|a, b| b.magnitude_db.total_cmp(&a.magnitude_db));
     peaks.truncate(10);
 
     let count_bins = (spectrum.len().saturating_sub(1)).max(1) as f64;

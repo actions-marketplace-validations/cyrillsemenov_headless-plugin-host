@@ -29,3 +29,6 @@ hph-au.workspace = true
 
 [dev-dependencies]
 hph-mock-plugin = { path = "../hph-mock-plugin" }
+
+[lints]
+workspace = true

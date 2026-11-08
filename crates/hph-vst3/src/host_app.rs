@@ -383,7 +383,7 @@ impl Vst3HostMessage {
         Box::into_raw(Box::new(Self {
             lp_vtbl: &HOST_MESSAGE_VTBL,
             ref_count: std::sync::atomic::AtomicU32::new(1),
-            message_id: Mutex::new(CString::new("").unwrap()),
+            message_id: Mutex::new(CString::default()),
             attrs: Vst3HostAttributeList::new_raw(),
         }))
     }

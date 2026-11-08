@@ -113,7 +113,9 @@ unsafe extern "C" fn params_value_to_text(
         }
         _ => return false,
     };
-    let cstr = CString::new(s).unwrap();
+    let Ok(cstr) = CString::new(s) else {
+        return false;
+    };
     let bytes = cstr.as_bytes_with_nul();
     let cap = out_buffer_capacity as usize;
     if cap == 0 {
@@ -273,10 +275,18 @@ unsafe extern "C" fn state_load(
     let mut bytes = [0u8; 32];
     if let Some(read_fn) = (*stream).read {
         if read_fn(stream, bytes.as_mut_ptr() as *mut c_void, 32) == 32 {
-            st.gain = f64::from_le_bytes(bytes[0..8].try_into().unwrap());
-            st.cutoff_hz = f64::from_le_bytes(bytes[8..16].try_into().unwrap());
-            st.drive = f64::from_le_bytes(bytes[16..24].try_into().unwrap());
-            st.bypass = f64::from_le_bytes(bytes[24..32].try_into().unwrap());
+            let (Ok(gain_b), Ok(cutoff_b), Ok(drive_b), Ok(bypass_b)) = (
+                bytes[0..8].try_into(),
+                bytes[8..16].try_into(),
+                bytes[16..24].try_into(),
+                bytes[24..32].try_into(),
+            ) else {
+                return false;
+            };
+            st.gain = f64::from_le_bytes(gain_b);
+            st.cutoff_hz = f64::from_le_bytes(cutoff_b);
+            st.drive = f64::from_le_bytes(drive_b);
+            st.bypass = f64::from_le_bytes(bypass_b);
             return true;
         }
     }

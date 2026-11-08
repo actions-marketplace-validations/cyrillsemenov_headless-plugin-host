@@ -11,3 +11,6 @@ hph-dsp.workspace = true
 hph-gui.workspace = true
 hph-validate.workspace = true
 serde.workspace = true
+
+[lints]
+workspace = true
